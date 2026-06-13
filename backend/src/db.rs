@@ -1,99 +1,236 @@
-//! 数据库访问层 (PostgreSQL + PostGIS)
+//! 数据库访问层
 
-use deadpool_postgres::{Config, Pool, PoolConfig, Runtime, ManagerConfig, RecyclingMethod};
+use deadpool_postgres::{Config, PoolConfig, Runtime, ManagerConfig, RecyclingMethod};
 use tokio_postgres::{NoTls, Row, types::ToSql};
+use std::env;
+
+pub use deadpool_postgres::Pool as DbPool;
 
 use crate::models::*;
-use crate::matching::{GuestStarObs, SupernovaRemnant as SnrMatchInput};
-
-/// 数据库连接池
-pub type DbPool = Pool;
+use crate::matching::{GuestStarObs, SupernovaRemnant as SnrMatchInput, MatchCandidate};
 
 /// 创建数据库连接池
-pub fn create_pool(
-    host: &str, port: u16, dbname: &str,
-    user: &str, password: &str, max_size: usize,
-) -> Result<DbPool, String> {
+pub fn create_pool() -> Result<DbPool, String> {
     let mut cfg = Config::new();
-    cfg.host = Some(host.into());
-    cfg.port = Some(port);
-    cfg.dbname = Some(dbname.into());
-    cfg.user = Some(user.into());
-    cfg.password = Some(password.into());
-
-    cfg.pool = Some(PoolConfig::new(max_size));
+    cfg.host = Some(env::var("DB_HOST").unwrap_or_else(|_| "localhost".into()));
+    cfg.port = Some(env::var("DB_PORT").ok().and_then(|s| s.parse().ok()).unwrap_or(5432));
+    cfg.dbname = Some(env::var("DB_NAME").unwrap_or_else(|_| "ancient_star_catalog".into()));
+    cfg.user = Some(env::var("DB_USER").unwrap_or_else(|_| "postgres".into()));
+    cfg.password = Some(env::var("DB_PASSWORD").unwrap_or_else(|_| "postgres".into()));
+    let max_conn: usize = env::var("MAX_DB_CONN").ok()
+        .and_then(|s| s.parse().ok()).unwrap_or(16);
     cfg.manager = Some(ManagerConfig {
         recycling_method: RecyclingMethod::Fast,
     });
+    cfg.pool = Some(PoolConfig::new(max_conn));
 
-    cfg.create_pool(Some(Runtime::Tokio1), NoTls)
-        .map_err(|e| format!("create pool failed: {}", e))
+    cfg.create_pool(Some(Runtime::Tokio1), NoTls).map_err(|e| e.to_string())
 }
 
-// ======================================================================
-// 基础查询辅助
-// ======================================================================
+// ============================================================
+// 通用: Row → Struct
+// ============================================================
 
-fn q(sql: &str) -> String { sql.into() }
+fn get_opt<T: tokio_postgres::types::FromSqlOwned>(row: &Row, col: &str) -> Option<T> {
+    row.try_get(col).ok()
+}
+fn get_str(row: &Row, col: &str) -> String {
+    row.try_get::<&str, Option<String>>(col).ok().flatten().unwrap_or_default()
+}
 
-// ======================================================================
-// 朝代
-// ======================================================================
+fn row_to_dynasty(r: &Row) -> Dynasty {
+    Dynasty {
+        id: r.get("id"),
+        name_cn: get_str(r, "name_cn"),
+        name_pinyin: get_str(r, "name_pinyin"),
+        start_year: r.get("start_year"),
+        end_year: r.get("end_year"),
+        canonical_epoch: r.get("canonical_epoch"),
+        color_hex: get_str(r, "color_hex"),
+    }
+}
+
+fn row_to_mansion(r: &Row) -> LunarMansion {
+    LunarMansion {
+        id: r.get("id"),
+        mansion_order: r.get("mansion_order"),
+        name_cn: get_str(r, "name_cn"),
+        name_pinyin: get_str(r, "name_pinyin"),
+        ruxiu_width_deg: r.get("ruxiu_width_deg"),
+        ra_start_deg: r.get("ra_start_deg"),
+        ra_end_deg: r.get("ra_end_deg"),
+    }
+}
+
+fn row_to_star(r: &Row) -> AncientStar {
+    AncientStar {
+        id: r.get("id"),
+        star_id_code: get_str(r, "star_id_code"),
+        dynasty_id: r.get("dynasty_id"),
+        mansion_id: get_opt(r, "mansion_id"),
+        star_name_cn: get_str(r, "star_name_cn"),
+        star_name_alt: get_opt(r, "star_name_alt"),
+        constellation: get_opt(r, "constellation"),
+        ruxiu_du: get_opt(r, "ruxiu_du"),
+        quji_du: get_opt(r, "quji_du"),
+        ra_ancient_conv: get_opt(r, "ra_ancient_conv"),
+        dec_ancient_conv: get_opt(r, "dec_ancient_conv"),
+        ra_j2000: get_opt(r, "ra_j2000"),
+        dec_j2000: get_opt(r, "dec_j2000"),
+        magnitude_ancient: get_opt(r, "magnitude_ancient"),
+        magnitude_num: get_opt(r, "magnitude_num"),
+        color_desc: get_opt(r, "color_desc"),
+        color_class: get_opt(r, "color_class"),
+        color_temp_k: get_opt(r, "color_temp_k"),
+        proper_motion_ra: get_opt(r, "proper_motion_ra"),
+        proper_motion_dec: get_opt(r, "proper_motion_dec"),
+        parallax: get_opt(r, "parallax"),
+        source_book: get_opt(r, "source_book"),
+        quality_flag: r.get("quality_flag"),
+        notes: get_opt(r, "notes"),
+        modern_hd_id: get_opt(r, "modern_hd_id"),
+        cross_match_id: get_opt(r, "cross_match_id"),
+        dynasty_name: get_opt(r, "dynasty_name"),
+        mansion_name: get_opt(r, "mansion_name"),
+        mansion_order: get_opt(r, "mansion_order"),
+    }
+}
+
+fn row_to_comet(r: &Row) -> AncientComet {
+    AncientComet {
+        id: r.get("id"),
+        comet_id_code: get_str(r, "comet_id_code"),
+        dynasty_id: r.get("dynasty_id"),
+        year_ancient: get_opt(r, "year_ancient"),
+        year_ce: get_opt(r, "year_ce"),
+        ruxiu_du: get_opt(r, "ruxiu_du"),
+        quji_du: get_opt(r, "quji_du"),
+        ra_deg: get_opt(r, "ra_deg"),
+        dec_deg: get_opt(r, "dec_deg"),
+        magnitude: get_opt(r, "magnitude"),
+        color_desc: get_opt(r, "color_desc"),
+        tail_direction: get_opt(r, "tail_direction"),
+        tail_length: get_opt(r, "tail_length"),
+        duration_days: get_opt(r, "duration_days"),
+        description: get_opt(r, "description"),
+        dynasty_name: get_opt(r, "dynasty_name"),
+    }
+}
+
+fn row_to_guest(r: &Row) -> GuestStar {
+    GuestStar {
+        id: r.get("id"),
+        guest_id_code: get_str(r, "guest_id_code"),
+        dynasty_id: r.get("dynasty_id"),
+        star_name: get_opt(r, "star_name"),
+        year_ancient: r.get("year_ancient"),
+        year_ce: r.get("year_ce"),
+        month_ancient: get_opt(r, "month_ancient"),
+        day_ancient: get_opt(r, "day_ancient"),
+        ruxiu_du: get_opt(r, "ruxiu_du"),
+        quji_du: get_opt(r, "quji_du"),
+        ra_deg: get_opt(r, "ra_deg"),
+        dec_deg: get_opt(r, "dec_deg"),
+        ra_err: r.get("ra_err"),
+        dec_err: r.get("dec_err"),
+        peak_mag: r.get("peak_mag"),
+        peak_mag_err: r.get("peak_mag_err"),
+        visibility_days: get_opt(r, "visibility_days"),
+        lightcurve_type: get_str(r, "lightcurve_type"),
+        description: get_opt(r, "description"),
+        position_desc: get_opt(r, "position_desc"),
+        dynasty_name: get_opt(r, "dynasty_name"),
+        matched_snr_id: get_opt(r, "matched_snr_id"),
+    }
+}
+
+fn row_to_snr(r: &Row) -> SupernovaRemnantDb {
+    SupernovaRemnantDb {
+        id: r.get("id"),
+        remnant_name: get_str(r, "remnant_name"),
+        sn_type: get_str(r, "sn_type"),
+        ra_deg: r.get("ra_deg"),
+        dec_deg: r.get("dec_deg"),
+        gal_l: get_opt(r, "gal_l"),
+        gal_b: get_opt(r, "gal_b"),
+        age_yr: r.get("age_yr"),
+        age_err_yr: r.get("age_err_yr"),
+        distance_kpc: r.get("distance_kpc"),
+        distance_err: r.get("distance_err"),
+        diameter_pc: get_opt(r, "diameter_pc"),
+        radio_flux_ghz: get_opt(r, "radio_flux_ghz"),
+        xray_luminosity: get_opt(r, "xray_luminosity"),
+        gamma_detected: r.get("gamma_detected"),
+        historical_sn_id: get_opt(r, "historical_sn_id"),
+    }
+}
+
+fn row_to_match(r: &Row) -> MatchResult {
+    MatchResult {
+        id: r.get("id"),
+        guest_id: r.get("guest_id"),
+        remnant_id: r.get("remnant_id"),
+        remnant_name: get_str(r, "remnant_name"),
+        remnant_type: get_str(r, "remnant_type"),
+        rank_within_guest: r.get("rank_within_guest"),
+        match_probability: r.get("match_probability"),
+        log_posterior: r.get("log_posterior"),
+        log_likelihood: r.get("log_likelihood"),
+        log_prior: r.get("log_prior"),
+        bayes_factor: r.get("bayes_factor"),
+        angular_sep_arcmin: r.get("angular_sep_arcmin"),
+        time_delta_yr: r.get("time_delta_yr"),
+        spatial_score: r.get("spatial_score"),
+        temporal_score: r.get("temporal_score"),
+        magnitude_score: r.get("magnitude_score"),
+        lightcurve_score: r.get("lightcurve_score"),
+        model_version: get_str(r, "model_version"),
+    }
+}
+
+fn row_to_dynasty_info(r: &Row, prefix: &str) -> DynastyInfo {
+    let id_col = format!("{prefix}_id");
+    let name_col = format!("{prefix}_name");
+    let year_col = format!("{prefix}_year");
+    DynastyInfo {
+        id: r.get(id_col.as_str()),
+        name: get_str(r, name_col.as_str()),
+        year: r.get(year_col.as_str()),
+    }
+}
+
+fn row_to_cross(r: &Row) -> CrossDynastyPair {
+    CrossDynastyPair {
+        dynasty_1: row_to_dynasty_info(r, "d1"),
+        dynasty_2: row_to_dynasty_info(r, "d2"),
+        star_id_1: r.get("s1_id"),
+        star_id_2: r.get("s2_id"),
+        delta_ruxiu: r.get("delta_ruxiu"),
+        delta_quji: r.get("delta_quji"),
+        delta_ra: r.get("delta_ra"),
+        delta_dec: r.get("delta_dec"),
+    }
+}
+
+// ============================================================
+// 查询函数
+// ============================================================
 
 pub async fn list_dynasties(pool: &DbPool) -> Result<Vec<Dynasty>, String> {
     let client = pool.get().await.map_err(|e| e.to_string())?;
     let rows = client.query(
-        "SELECT id, name_cn, name_en, start_year, end_year, canonical_epoch,
-                epoch_jd, description, created_at FROM dynasties ORDER BY start_year",
-        &[]
-    ).await.map_err(|e| e.to_string())?;
+        "SELECT * FROM dynasties ORDER BY start_year", &[]).await
+        .map_err(|e| e.to_string())?;
     Ok(rows.iter().map(row_to_dynasty).collect())
 }
-
-fn row_to_dynasty(row: &Row) -> Dynasty {
-    Dynasty {
-        id: row.get("id"),
-        name_cn: row.get("name_cn"),
-        name_en: row.get("name_en"),
-        start_year: row.get("start_year"),
-        end_year: row.get("end_year"),
-        canonical_epoch: row.get("canonical_epoch"),
-        epoch_jd: row.get("epoch_jd"),
-        description: row.get("description"),
-        created_at: row.get("created_at"),
-    }
-}
-
-// ======================================================================
-// 二十八宿
-// ======================================================================
 
 pub async fn list_mansions(pool: &DbPool) -> Result<Vec<LunarMansion>, String> {
     let client = pool.get().await.map_err(|e| e.to_string())?;
     let rows = client.query(
-        "SELECT * FROM lunar_mansions ORDER BY mansion_order",
-        &[]
-    ).await.map_err(|e| e.to_string())?;
+        "SELECT * FROM lunar_mansions ORDER BY mansion_order", &[]).await
+        .map_err(|e| e.to_string())?;
     Ok(rows.iter().map(row_to_mansion).collect())
 }
-
-fn row_to_mansion(row: &Row) -> LunarMansion {
-    LunarMansion {
-        id: row.get("id"),
-        mansion_order: row.get("mansion_order"),
-        name_cn: row.get("name_cn"),
-        name_pinyin: row.get("name_pinyin"),
-        animal: row.get("animal"),
-        azimuth: row.get("azimuth"),
-        standard_ra_deg: row.get("standard_ra_deg"),
-        extent_deg: row.get("extent_deg"),
-        description: row.get("description"),
-    }
-}
-
-// ======================================================================
-// 恒星查询
-// ======================================================================
 
 pub async fn query_stars(pool: &DbPool, params: &StarQueryParams)
     -> Result<(Vec<AncientStar>, i64), String>
@@ -198,371 +335,195 @@ pub async fn query_stars(pool: &DbPool, params: &StarQueryParams)
     Ok((rows.iter().map(row_to_star).collect(), count))
 }
 
-fn row_to_star(row: &Row) -> AncientStar {
-    AncientStar {
-        id: row.get("id"),
-        star_name_cn: row.get("star_name_cn"),
-        star_name_alt: row.get("star_name_alt"),
-        constellation: row.get("constellation"),
-        mansion_id: row.get("mansion_id"),
-        dynasty_id: row.get("dynasty_id"),
-        source_book: row.get("source_book"),
-        source_chapter: row.get("source_chapter"),
-        ruxiu_du: row.get("ruxiu_du"),
-        quji_du: row.get("quji_du"),
-        ruxiu_du_raw: row.get("ruxiu_du_raw"),
-        quji_du_raw: row.get("quji_du_raw"),
-        magnitude_ancient: row.get("magnitude_ancient"),
-        magnitude_num: row.get("magnitude_num"),
-        color_desc: row.get("color_desc"),
-        color_class: row.get("color_class"),
-        ra_j2000: row.get("ra_j2000"),
-        dec_j2000: row.get("dec_j2000"),
-        ra_ancient_conv: row.get("ra_ancient_conv"),
-        dec_ancient_conv: row.get("dec_ancient_conv"),
-        proper_motion_ra: row.get("proper_motion_ra"),
-        proper_motion_dec: row.get("proper_motion_dec"),
-        parallax: row.get("parallax"),
-        hipparcos_id: row.get("hipparcos_id"),
-        henry_draper_id: row.get("henry_draper_id"),
-        quality_flag: row.get("quality_flag"),
-        notes: row.get("notes"),
-        created_at: row.get("created_at"),
-        dynasty_name: row.get("dynasty_name"),
-        mansion_name: row.get("mansion_name"),
-        mansion_order: row.get("mansion_order"),
-    }
-}
-
-pub async fn get_star_by_id(pool: &DbPool, id: i64) -> Result<Option<AncientStar>, String> {
+pub async fn get_star(pool: &DbPool, id: i64) -> Result<Option<AncientStar>, String> {
     let client = pool.get().await.map_err(|e| e.to_string())?;
-    let row = client.query_opt(
+    let rows = client.query(
         "SELECT s.*, d.name_cn AS dynasty_name, m.name_cn AS mansion_name,
                 m.mansion_order AS mansion_order
          FROM ancient_stars s
          LEFT JOIN dynasties d ON s.dynasty_id = d.id
          LEFT JOIN lunar_mansions m ON s.mansion_id = m.id
-         WHERE s.id = $1",
-        &[&id]
-    ).await.map_err(|e| e.to_string())?;
-    Ok(row.map(|r| row_to_star(&r)))
+         WHERE s.id = $1", &[&id]).await
+        .map_err(|e| e.to_string())?;
+    Ok(rows.first().map(row_to_star))
 }
 
-pub async fn get_star_cross_dynasty(
-    pool: &DbPool,
-    star_id: Option<i64>,
-    star_name: Option<&str>,
-) -> Result<Vec<CrossDynastyPair>, String> {
+pub async fn list_comets(pool: &DbPool) -> Result<Vec<AncientComet>, String> {
     let client = pool.get().await.map_err(|e| e.to_string())?;
-    let sql = "
-        SELECT
-            s1.star_name_cn, s1.constellation,
-            d1.id AS d1_id, d1.name_cn AS d1_name, d1.canonical_epoch AS d1_epoch,
-            d2.id AS d2_id, d2.name_cn AS d2_name, d2.canonical_epoch AS d2_epoch,
-            s1.ruxiu_du AS r1, s1.quji_du AS q1,
-            s1.ra_ancient_conv AS ra1, s1.dec_ancient_conv AS dec1,
-            s1.magnitude_num AS mag1, s1.color_desc AS col1, s1.source_book AS src1,
-            s2.ruxiu_du AS r2, s2.quji_du AS q2,
-            s2.ra_ancient_conv AS ra2, s2.dec_ancient_conv AS dec2,
-            s2.magnitude_num AS mag2, s2.color_desc AS col2, s2.source_book AS src2,
-            (s2.ruxiu_du - s1.ruxiu_du) AS delta_ruxiu,
-            (s2.quji_du  - s1.quji_du)  AS delta_quji,
-            s1.ra_j2000, s1.dec_j2000
-        FROM ancient_stars s1
-        JOIN ancient_stars s2
-            ON s1.star_name_cn = s2.star_name_cn
-            AND s1.dynasty_id < s2.dynasty_id
-            AND s1.id != s2.id
-        JOIN dynasties d1 ON s1.dynasty_id = d1.id
-        JOIN dynasties d2 ON s2.dynasty_id = d2.id
-        WHERE 1=1
-            AND ($1::bigint IS NULL OR s1.id = $1)
-            AND ($2::text   IS NULL OR s1.star_name_cn ILIKE '%' || $2 || '%')
-        ORDER BY s1.star_name_cn, d1.start_year
-        LIMIT 500";
-    let rows = client.query(sql, &[&star_id, &star_name]).await.map_err(|e| e.to_string())?;
-    Ok(rows.iter().map(|r| CrossDynastyPair {
-        star_name: r.get("star_name_cn"),
-        constellation: r.get("constellation"),
-        dynasty_1: DynastyInfo {
-            id: r.get("d1_id"), name: r.get("d1_name"), epoch: r.get("d1_epoch"),
-        },
-        dynasty_2: DynastyInfo {
-            id: r.get("d2_id"), name: r.get("d2_name"), epoch: r.get("d2_epoch"),
-        },
-        coord_1: CoordAncient {
-            ruxiu_du: r.get("r1"), quji_du: r.get("q1"),
-            ra_conv: r.get("ra1"), dec_conv: r.get("dec1"),
-            magnitude_num: r.get("mag1"), color_desc: r.get("col1"),
-            source_book: r.get("src1"),
-        },
-        coord_2: CoordAncient {
-            ruxiu_du: r.get("r2"), quji_du: r.get("q2"),
-            ra_conv: r.get("ra2"), dec_conv: r.get("dec2"),
-            magnitude_num: r.get("mag2"), color_desc: r.get("col2"),
-            source_book: r.get("src2"),
-        },
-        delta_ruxiu: r.get("delta_ruxiu"),
-        delta_quji: r.get("delta_quji"),
-        j2000_ra: r.get("ra_j2000"),
-        j2000_dec: r.get("dec_j2000"),
-    }).collect())
-}
-
-// ======================================================================
-// 彗星 & 客星
-// ======================================================================
-
-pub async fn list_comets(pool: &DbPool, dynasty_id: Option<i32>)
-    -> Result<Vec<AncientComet>, String>
-{
-    let client = pool.get().await.map_err(|e| e.to_string())?;
-    let sql = "SELECT c.*, d.name_cn AS dynasty_name
-               FROM ancient_comets c
-               LEFT JOIN dynasties d ON c.dynasty_id = d.id
-               WHERE $1::int IS NULL OR c.dynasty_id = $1
-               ORDER BY c.start_jd";
-    let rows = client.query(sql, &[&dynasty_id]).await.map_err(|e| e.to_string())?;
+    let rows = client.query(
+        "SELECT c.*, d.name_cn AS dynasty_name FROM ancient_comets c
+         LEFT JOIN dynasties d ON c.dynasty_id = d.id", &[]).await
+        .map_err(|e| e.to_string())?;
     Ok(rows.iter().map(row_to_comet).collect())
 }
 
-fn row_to_comet(row: &Row) -> AncientComet {
-    AncientComet {
-        id: row.get("id"),
-        comet_name: row.get("comet_name"),
-        appearance_id: row.get("appearance_id"),
-        dynasty_id: row.get("dynasty_id"),
-        source_book: row.get("source_book"),
-        start_date_text: row.get("start_date_text"),
-        end_date_text: row.get("end_date_text"),
-        start_jd: row.get("start_jd"),
-        end_jd: row.get("end_jd"),
-        duration_days: row.get("duration_days"),
-        ruxiu_du: row.get("ruxiu_du"),
-        quji_du: row.get("quji_du"),
-        position_desc: row.get("position_desc"),
-        brightness_desc: row.get("brightness_desc"),
-        estimated_mag: row.get("estimated_mag"),
-        tail_length: row.get("tail_length"),
-        tail_direction: row.get("tail_direction"),
-        ra_apparent: row.get("ra_apparent"),
-        dec_apparent: row.get("dec_apparent"),
-        notes: row.get("notes"),
-        dynasty_name: row.get("dynasty_name"),
-    }
-}
-
-pub async fn list_guest_stars(pool: &DbPool, dynasty_id: Option<i32>)
-    -> Result<Vec<GuestStar>, String>
-{
+pub async fn list_guest_stars(pool: &DbPool) -> Result<Vec<GuestStar>, String> {
     let client = pool.get().await.map_err(|e| e.to_string())?;
-    let sql = "SELECT g.*, d.name_cn AS dynasty_name
-               FROM guest_stars g
-               LEFT JOIN dynasties d ON g.dynasty_id = d.id
-               WHERE $1::int IS NULL OR g.dynasty_id = $1
-               ORDER BY g.start_jd";
-    let rows = client.query(sql, &[&dynasty_id]).await.map_err(|e| e.to_string())?;
+    let rows = client.query(
+        "SELECT g.*, d.name_cn AS dynasty_name FROM guest_stars g
+         LEFT JOIN dynasties d ON g.dynasty_id = d.id
+         ORDER BY g.year_ce", &[]).await
+        .map_err(|e| e.to_string())?;
     Ok(rows.iter().map(row_to_guest).collect())
 }
 
-fn row_to_guest(row: &Row) -> GuestStar {
-    GuestStar {
-        id: row.get("id"),
-        guest_name: row.get("guest_name"),
-        guest_id_code: row.get("guest_id_code"),
-        dynasty_id: row.get("dynasty_id"),
-        source_book: row.get("source_book"),
-        appearance_date: row.get("appearance_date"),
-        disappearance_date: row.get("disappearance_date"),
-        start_jd: row.get("start_jd"),
-        end_jd: row.get("end_jd"),
-        visibility_days: row.get("visibility_days"),
-        ruxiu_du: row.get("ruxiu_du"),
-        quji_du: row.get("quji_du"),
-        position_desc: row.get("position_desc"),
-        peak_mag: row.get("peak_mag"),
-        peak_mag_err: row.get("peak_mag_err"),
-        light_curve_desc: row.get("light_curve_desc"),
-        color_at_peak: row.get("color_at_peak"),
-        ra_est: row.get("ra_est"),
-        dec_est: row.get("dec_est"),
-        ra_err: row.get("ra_err"),
-        dec_err: row.get("dec_err"),
-        remnant_candidate: row.get("remnant_candidate"),
-        sn_type_hint: row.get("sn_type_hint"),
-        notes: row.get("notes"),
-        dynasty_name: row.get("dynasty_name"),
-    }
+pub async fn get_guest_star(pool: &DbPool, id: i64) -> Result<Option<GuestStar>, String> {
+    let client = pool.get().await.map_err(|e| e.to_string())?;
+    let rows = client.query(
+        "SELECT g.*, d.name_cn AS dynasty_name FROM guest_stars g
+         LEFT JOIN dynasties d ON g.dynasty_id = d.id
+         WHERE g.id = $1", &[&id]).await
+        .map_err(|e| e.to_string())?;
+    Ok(rows.first().map(row_to_guest))
 }
 
-pub async fn get_guest_star_by_id(pool: &DbPool, id: i64)
-    -> Result<Option<GuestStar>, String>
-{
+pub async fn list_snr(pool: &DbPool) -> Result<Vec<SupernovaRemnantDb>, String> {
     let client = pool.get().await.map_err(|e| e.to_string())?;
-    let row = client.query_opt(
-        "SELECT g.*, d.name_cn AS dynasty_name
-         FROM guest_stars g LEFT JOIN dynasties d ON g.dynasty_id = d.id
-         WHERE g.id = $1",
-        &[&id]
-    ).await.map_err(|e| e.to_string())?;
-    Ok(row.map(|r| row_to_guest(&r)))
-}
-
-pub async fn list_snr(pool: &DbPool) -> Result<Vec<SupernovaRemnant>, String> {
-    let client = pool.get().await.map_err(|e| e.to_string())?;
-    let rows = client.query("SELECT * FROM supernova_remnants ORDER BY age_yr", &[])
-        .await.map_err(|e| e.to_string())?;
+    let rows = client.query("SELECT * FROM supernova_remnants ORDER BY id", &[]).await
+        .map_err(|e| e.to_string())?;
     Ok(rows.iter().map(row_to_snr).collect())
 }
 
-fn row_to_snr(row: &Row) -> SupernovaRemnant {
-    SupernovaRemnant {
-        id: row.get("id"),
-        remnant_name: row.get("remnant_name"),
-        alias_names: row.get("alias_names"),
-        sn_type: row.get("sn_type"),
-        ra_deg: row.get("ra_deg"),
-        dec_deg: row.get("dec_deg"),
-        ra_err: row.get("ra_err"),
-        dec_err: row.get("dec_err"),
-        age_yr: row.get("age_yr"),
-        age_err: row.get("age_err"),
-        explosion_jd: row.get("explosion_jd"),
-        explosion_year_est: row.get("explosion_year_est"),
-        distance_kpc: row.get("distance_kpc"),
-        distance_err: row.get("distance_err"),
-        diameter_pc: row.get("diameter_pc"),
-        radio_flux_ghz: row.get("radio_flux_ghz"),
-        xray_luminosity: row.get("xray_luminosity"),
-        gamma_detected: row.get("gamma_detected"),
-        expansion_vel: row.get("expansion_vel"),
-        spectral_index: row.get("spectral_index"),
-        notes: row.get("notes"),
-    }
-}
-
-// ======================================================================
-// 获取匹配用的输入结构
-// ======================================================================
+// ============================================================
+// 匹配相关
+// ============================================================
 
 pub async fn get_guest_for_match(pool: &DbPool, id: i64)
     -> Result<Option<GuestStarObs>, String>
 {
-    let g = match get_guest_star_by_id(pool, id).await? {
-        Some(g) => g, None => return Ok(None),
-    };
-    Ok(Some(GuestStarObs {
+    Ok(get_guest_star(pool, id).await?.map(|g| GuestStarObs {
         id: g.id,
-        name: g.guest_name.unwrap_or_default(),
-        id_code: g.guest_id_code.unwrap_or_default(),
-        ra_est: g.ra_est.unwrap_or(0.0),
-        dec_est: g.dec_est.unwrap_or(0.0),
-        ra_err: g.ra_err.unwrap_or(0.5),
-        dec_err: g.dec_err.unwrap_or(0.5),
-        start_jd: g.start_jd.unwrap_or(0.0),
-        end_jd: g.end_jd,
+        guest_id_code: g.guest_id_code,
+        year_ancient: g.year_ancient,
+        year_ce: g.year_ce,
+        month_ancient: g.month_ancient,
+        day_ancient: g.day_ancient,
+        ruxiu_du: g.ruxiu_du,
+        quji_du: g.quji_du,
+        ra_deg: g.ra_deg,
+        dec_deg: g.dec_deg,
+        ra_err: g.ra_err,
+        dec_err: g.dec_err,
+        peak_mag: g.peak_mag,
+        peak_mag_err: g.peak_mag_err,
         visibility_days: g.visibility_days,
-        peak_mag: g.peak_mag.unwrap_or(0.0),
-        peak_mag_err: g.peak_mag_err.unwrap_or(0.5),
-        sn_type_hint: g.sn_type_hint,
-        color_at_peak: g.color_at_peak,
+        lightcurve_type: g.lightcurve_type,
+        description: g.description,
+        position_desc: g.position_desc,
+        dynasty_name: g.dynasty_name,
     }))
 }
 
-pub async fn list_snr_for_match(pool: &DbPool)
-    -> Result<Vec<SnrMatchInput>, String>
-{
-    let list = list_snr(pool).await?;
-    Ok(list.into_iter().map(|s| SnrMatchInput {
+pub async fn list_snr_for_match(pool: &DbPool) -> Result<Vec<SnrMatchInput>, String> {
+    Ok(list_snr(pool).await?.into_iter().map(|s| SnrMatchInput {
         id: s.id,
-        name: s.remnant_name,
-        sn_type: s.sn_type.unwrap_or_else(|| "II".into()),
+        remnant_name: s.remnant_name,
+        sn_type: s.sn_type,
         ra_deg: s.ra_deg,
         dec_deg: s.dec_deg,
-        ra_err: s.ra_err.unwrap_or(0.5),
-        dec_err: s.dec_err.unwrap_or(0.5),
-        age_yr: s.age_yr.unwrap_or(1000.0),
-        age_err: s.age_err.unwrap_or(200.0),
-        explosion_year_est: s.explosion_year_est.unwrap_or(1000.0),
-        distance_kpc: s.distance_kpc.unwrap_or(5.0),
-        distance_err: s.distance_err.unwrap_or(1.0),
-        diameter_pc: s.diameter_pc.unwrap_or(10.0),
-        radio_flux_ghz: s.radio_flux_ghz.unwrap_or(50.0),
-        xray_luminosity: s.xray_luminosity.unwrap_or(1e36),
-        expansion_vel: s.expansion_vel.unwrap_or(500.0),
-        gamma_detected: s.gamma_detected.unwrap_or(false),
+        gal_l: s.gal_l,
+        gal_b: s.gal_b,
+        age_yr: s.age_yr,
+        age_err_yr: s.age_err_yr,
+        distance_kpc: s.distance_kpc,
+        distance_err: s.distance_err,
+        diameter_pc: s.diameter_pc,
+        radio_flux_ghz: s.radio_flux_ghz,
+        xray_luminosity: s.xray_luminosity,
+        gamma_detected: s.gamma_detected,
+        historical_sn_id: s.historical_sn_id,
     }).collect())
 }
-
-// ======================================================================
-// 保存匹配结果到数据库
-// ======================================================================
 
 pub async fn save_match_result(
     pool: &DbPool,
     guest_id: i64,
-    matches: &[crate::matching::MatchCandidate],
-    method_version: &str,
-) -> Result<usize, String>
-{
+    candidates: &[MatchCandidate],
+    model_version: &str,
+) -> Result<(), String> {
     let client = pool.get().await.map_err(|e| e.to_string())?;
-    // 先删除旧结果
-    client.execute(
-        "DELETE FROM guest_star_matches WHERE guest_star_id = $1",
-        &[&guest_id]
-    ).await.map_err(|e| e.to_string())?;
-
-    let mut saved = 0;
-    for m in matches {
+    // 先清除旧结果
+    client.execute("DELETE FROM guest_star_matches WHERE guest_id = $1", &[&guest_id])
+        .await.map_err(|e| e.to_string())?;
+    for c in candidates {
         client.execute(
             "INSERT INTO guest_star_matches
-                (guest_star_id, remnant_id,
-                 spatial_score, temporal_score, magnitude_score,
-                 total_log_posterior, match_probability, rank_within_guest,
-                 angular_sep_arcmin, time_delta_yr, bayes_factor, method_version)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
-            &[
-                &m.guest_id, &m.remnant_id,
-                &m.log_p_spatial, &m.log_p_temporal, &m.log_p_magnitude,
-                &m.log_posterior, &m.match_probability, &m.rank_within_guest,
-                &m.angular_sep_arcmin, &m.time_delta_yr, &m.bayes_factor,
-                &method_version.to_string(),
-            ]
+             (guest_id, remnant_id, rank_within_guest, match_probability,
+              log_posterior, log_likelihood, log_prior, bayes_factor,
+              angular_sep_arcmin, time_delta_yr, spatial_score,
+              temporal_score, magnitude_score, lightcurve_score, model_version)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)",
+            &[&c.guest_id, &c.remnant_id, &c.rank_within_guest,
+              &c.match_probability, &c.log_posterior, &c.log_likelihood,
+              &c.log_prior, &c.bayes_factor, &c.angular_sep_arcmin,
+              &c.time_delta_yr, &c.spatial_score, &c.temporal_score,
+              &c.magnitude_score, &c.lightcurve_score, &model_version],
         ).await.map_err(|e| e.to_string())?;
-        saved += 1;
     }
-    Ok(saved)
+    Ok(())
 }
 
-pub async fn get_saved_matches(pool: &DbPool, guest_id: i64)
-    -> Result<Vec<crate::matching::MatchCandidate>, String>
+pub async fn get_match_results(pool: &DbPool, guest_id: i64)
+    -> Result<Vec<MatchResult>, String>
 {
     let client = pool.get().await.map_err(|e| e.to_string())?;
     let rows = client.query(
-        "SELECT m.*, s.remnant_name, s.sn_type
+        "SELECT m.*, r.remnant_name, r.sn_type AS remnant_type
          FROM guest_star_matches m
-         JOIN supernova_remnants s ON m.remnant_id = s.id
-         WHERE m.guest_star_id = $1
-         ORDER BY m.match_probability DESC, m.rank_within_guest",
-        &[&guest_id]
-    ).await.map_err(|e| e.to_string())?;
-    Ok(rows.iter().map(|r| crate::matching::MatchCandidate {
-        guest_id: r.get("guest_star_id"),
-        remnant_id: r.get("remnant_id"),
-        remnant_name: r.get("remnant_name"),
-        remnant_type: r.get("sn_type"),
-        angular_sep_deg: r.get::<_, Option<f64>>("angular_sep_arcmin").unwrap_or(0.0) / 60.0,
-        angular_sep_arcmin: r.get("angular_sep_arcmin"),
-        time_delta_yr: r.get("time_delta_yr"),
-        log_p_spatial: r.get("spatial_score"),
-        log_p_temporal: r.get("temporal_score"),
-        log_p_magnitude: r.get("magnitude_score"),
-        log_p_lc: 0.0,
-        log_prior: 0.0,
-        log_posterior: r.get("total_log_posterior"),
-        match_probability: r.get("match_probability"),
-        rank_within_guest: r.get("rank_within_guest"),
-        bayes_factor: r.get("bayes_factor"),
-        score_breakdown: crate::matching::ScoreBreakdown::default(),
-    }).collect())
+         JOIN supernova_remnants r ON m.remnant_id = r.id
+         WHERE m.guest_id = $1
+         ORDER BY m.rank_within_guest", &[&guest_id]).await
+        .map_err(|e| e.to_string())?;
+    Ok(rows.iter().map(row_to_match).collect())
+}
+
+// ============================================================
+// 跨朝代对比
+// ============================================================
+
+pub async fn get_star_cross_dynasty(pool: &DbPool, _star_id: Option<i64>, star_name: Option<String>)
+    -> Result<Vec<CrossDynastyPair>, String>
+{
+    // 简化版: 通过星名精确匹配跨朝代记录
+    let client = pool.get().await.map_err(|e| e.to_string())?;
+    let rows = if let Some(ref name) = star_name {
+        client.query(
+            "SELECT
+                s1.id AS s1_id, s2.id AS s2_id,
+                s1.ruxiu_du - s2.ruxiu_du AS delta_ruxiu,
+                s1.quji_du - s2.quji_du AS delta_quji,
+                s1.ra_j2000 - s2.ra_j2000 AS delta_ra,
+                s1.dec_j2000 - s2.dec_j2000 AS delta_dec,
+                d1.id AS d1_id, d1.name_cn AS d1_name, d1.canonical_epoch::int AS d1_year,
+                d2.id AS d2_id, d2.name_cn AS d2_name, d2.canonical_epoch::int AS d2_year
+             FROM ancient_stars s1
+             JOIN ancient_stars s2 ON s1.star_name_cn = s2.star_name_cn AND s1.dynasty_id < s2.dynasty_id
+             JOIN dynasties d1 ON s1.dynasty_id = d1.id
+             JOIN dynasties d2 ON s2.dynasty_id = d2.id
+             WHERE s1.star_name_cn = $1 AND s1.ruxiu_du IS NOT NULL AND s2.ruxiu_du IS NOT NULL
+             ORDER BY d1.start_year, d2.start_year
+             LIMIT 20",
+            &[&name.clone()],
+        ).await.map_err(|e| e.to_string())?
+    } else {
+        client.query(
+            "SELECT
+                s1.id AS s1_id, s2.id AS s2_id,
+                s1.ruxiu_du - s2.ruxiu_du AS delta_ruxiu,
+                s1.quji_du - s2.quji_du AS delta_quji,
+                s1.ra_j2000 - s2.ra_j2000 AS delta_ra,
+                s1.dec_j2000 - s2.dec_j2000 AS delta_dec,
+                d1.id AS d1_id, d1.name_cn AS d1_name, d1.canonical_epoch::int AS d1_year,
+                d2.id AS d2_id, d2.name_cn AS d2_name, d2.canonical_epoch::int AS d2_year
+             FROM ancient_stars s1
+             JOIN ancient_stars s2 ON s1.star_name_cn = s2.star_name_cn AND s1.dynasty_id < s2.dynasty_id
+             JOIN dynasties d1 ON s1.dynasty_id = d1.id
+             JOIN dynasties d2 ON s2.dynasty_id = d2.id
+             WHERE s1.ruxiu_du IS NOT NULL AND s2.ruxiu_du IS NOT NULL
+             ORDER BY d1.start_year, d2.start_year
+             LIMIT 50",
+            &[],
+        ).await.map_err(|e| e.to_string())?
+    };
+    Ok(rows.iter().map(row_to_cross).collect())
 }
