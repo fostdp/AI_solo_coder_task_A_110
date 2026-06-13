@@ -1,11 +1,24 @@
 //! 古代星表数据数字化与现代天体物理验证系统
-//! Rust 后端 (Actix-Web)
+//! Rust 后端 (Actix-Web) v0.3
 //!
-//! 修复记录 v0.2:
-//!   1. IAU 2006 岁差模型 + 行星摄动修正
-//!   2. 贝叶斯先验升级为银河系分布模型
-//!   3. 前端 Planck 黑体辐射色温映射 (前端修复)
+//! 架构重构 v0.3:
+//!   - 拆分为 3 个独立模块，通过 tokio channel 通信
+//!   - 模型参数全部从 config/ JSON 文件加载
+//!
+//! 模块职责:
+//!   catalog_loader        星表数据导入 + 清洗 (DB → Channel)
+//!   coordinate_transformer 岁差/章动/自行 + 误差估计
+//!   transient_matcher      客星-超新星贝叶斯匹配
+//!
+//! main.rs 职责:
+//!   - 加载配置
+//!   - 启动子模块任务
+//!   - 作为 REST API 层 + 模块协调器
 
+mod config;
+mod catalog_loader;
+mod coordinate_transformer;
+mod transient_matcher;
 mod astronomy;
 mod matching;
 mod models;
@@ -16,27 +29,46 @@ use actix_files::Files;
 use actix_cors::Cors;
 use std::env;
 use std::sync::Arc;
+use tokio::sync::Mutex;
+use tokio::time::{timeout, Duration};
 
+use config::AppConfig;
 use db::DbPool;
 use models::*;
-use astronomy::*;
-use matching::{MatchConfig, run_bayesian_match};
+use astronomy::{RuxiuToJ2000Request, TrajectoryRequest};
+use catalog_loader::{LoaderCommand, LoaderEvent};
+use coordinate_transformer::{TransformCommand, TransformEvent, TransformResult};
+use transient_matcher::{MatchCommand, MatchEvent, MatchMethodInfo};
 
 struct AppState {
     pool: DbPool,
-    match_cfg: MatchConfig,
+    config: AppConfig,
+    loader_tx: tokio::sync::mpsc::Sender<LoaderCommand>,
+    loader_rx: Arc<Mutex<tokio::sync::mpsc::Receiver<LoaderEvent>>>,
+    transform_tx: tokio::sync::mpsc::Sender<TransformCommand>,
+    transform_rx: Arc<Mutex<tokio::sync::mpsc::Receiver<TransformEvent>>>,
+    match_tx: tokio::sync::mpsc::Sender<MatchCommand>,
+    match_rx: Arc<Mutex<tokio::sync::mpsc::Receiver<MatchEvent>>>,
 }
+
+const CHANNEL_TIMEOUT_MS: u64 = 30000;
 
 // ============================================================
 // 健康检查
 // ============================================================
 
 #[get("/health")]
-async fn api_health() -> impl Responder {
+async fn api_health(data: web::Data<Arc<AppState>>) -> impl Responder {
     HttpResponse::Ok().json(ApiResponse::ok(serde_json::json!({
         "status": "ok",
         "version": env!("CARGO_PKG_VERSION"),
         "models": ["IAU 2006 precession", "Galactic prior Bayes", "Planck color temp"],
+        "modules": {
+            "precession": data.config.precession.model_name.clone(),
+            "matching": data.config.matching.model_name.clone(),
+            "catalog": data.config.catalog.model_name.clone(),
+        },
+        "architecture": "3-modules + channels (catalog_loader → coordinate_transformer → transient_matcher)",
     })))
 }
 
@@ -61,7 +93,7 @@ async fn api_mansions(data: web::Data<Arc<AppState>>) -> impl Responder {
 }
 
 // ============================================================
-// 恒星 CRUD + 查询
+// 恒星 CRUD + 查询 (通过 catalog_loader 模块)
 // ============================================================
 
 #[get("/stars")]
@@ -70,8 +102,31 @@ async fn api_query_stars(
     query: web::Query<StarQueryParams>,
 ) -> impl Responder {
     let params: StarQueryParams = query.into_inner();
+
     match db::query_stars(&data.pool, &params).await {
-        Ok((list, total)) => HttpResponse::Ok().json(ApiResponse::ok_with_count(list, total)),
+        Ok((list, total)) => {
+            let mut rx = data.loader_rx.lock().await;
+            if data.loader_tx.send(LoaderCommand::CleanStars {
+                stars: list.clone()
+            }).await.is_err() {
+                return HttpResponse::InternalServerError().json(
+                    ApiResponse::<()>::err("Loader channel send failed"));
+            }
+            match timeout(Duration::from_millis(CHANNEL_TIMEOUT_MS), rx.recv()).await {
+                Ok(Some(LoaderEvent::StarsCleaned { records, .. })) => {
+                    let response = serde_json::json!({
+                        "raw": list,
+                        "cleaned": records,
+                    });
+                    HttpResponse::Ok().json(ApiResponse::ok_with_count(response, total))
+                }
+                Ok(Some(LoaderEvent::Error { message })) => {
+                    HttpResponse::InternalServerError().json(
+                        ApiResponse::<()>::err(format!("Loader: {}", message)))
+                }
+                _ => HttpResponse::Ok().json(ApiResponse::ok_with_count(list, total)),
+            }
+        }
         Err(e) => HttpResponse::InternalServerError().json(ApiResponse::<()>::err(e)),
     }
 }
@@ -93,7 +148,6 @@ async fn api_cross_dynasty(
     data: web::Data<Arc<AppState>>,
     id: web::Path<i64>,
 ) -> impl Responder {
-    // 用 star_name 做跨朝代匹配
     let star_id = id.into_inner();
     let star_opt = db::get_star(&data.pool, star_id).await.ok().flatten();
     let name = star_opt.as_ref().map(|s| s.star_name_cn.clone());
@@ -107,21 +161,87 @@ async fn api_cross_dynasty(
 }
 
 // ============================================================
-// 坐标转换 API
+// 坐标转换 API (通过 coordinate_transformer 模块)
 // ============================================================
 
 #[post("/convert/ruxiu-to-j2000")]
 async fn api_convert_ruxiu(
+    data: web::Data<Arc<AppState>>,
     body: web::Json<RuxiuToJ2000Request>,
 ) -> impl Responder {
-    let result = convert_ruxiu_to_j2000(&body.into_inner());
-    HttpResponse::Ok().json(ApiResponse::ok(result))
+    let req = body.into_inner();
+    let cmd = TransformCommand::ConvertSingle {
+        ruxiu_du: req.ruxiu_du,
+        quji_du: req.quji_du,
+        mansion_order: req.mansion_order,
+        epoch_yr: req.epoch_yr,
+        pm_ra_mas: req.pm_ra_mas,
+        pm_dec_mas: req.pm_dec_mas,
+    };
+
+    let mut rx = data.transform_rx.lock().await;
+    if data.transform_tx.send(cmd).await.is_err() {
+        return HttpResponse::InternalServerError().json(
+            ApiResponse::<()>::err("Transform channel send failed"));
+    }
+
+    match timeout(Duration::from_millis(CHANNEL_TIMEOUT_MS), rx.recv()).await {
+        Ok(Some(TransformEvent::SingleConverted(result))) => {
+            let resp = build_convert_response(&result);
+            HttpResponse::Ok().json(ApiResponse::ok(resp))
+        }
+        Ok(Some(TransformEvent::Error { message })) => {
+            HttpResponse::InternalServerError().json(
+                ApiResponse::<()>::err(format!("Transform: {}", message)))
+        }
+        Ok(None) => {
+            HttpResponse::InternalServerError().json(
+                ApiResponse::<()>::err("Transform channel closed"))
+        }
+        Err(_) => {
+            HttpResponse::RequestTimeout().json(
+                ApiResponse::<()>::err("Transform timeout"))
+        }
+        _ => HttpResponse::InternalServerError().json(
+            ApiResponse::<()>::err("Unexpected transform event")),
+    }
 }
 
 #[post("/trajectory")]
-async fn api_trajectory(body: web::Json<TrajectoryRequest>) -> impl Responder {
-    let pts = compute_trajectory(&body.into_inner());
-    HttpResponse::Ok().json(ApiResponse::ok(pts))
+async fn api_trajectory(
+    data: web::Data<Arc<AppState>>,
+    body: web::Json<TrajectoryRequest>,
+) -> impl Responder {
+    let req = body.into_inner();
+    let cmd = TransformCommand::ComputeTrajectory {
+        ra_j2000: req.ra_j2000,
+        dec_j2000: req.dec_j2000,
+        pm_ra_mas: req.pm_ra_mas,
+        pm_dec_mas: req.pm_dec_mas,
+        year_start: req.year_start,
+        year_end: req.year_end,
+        n_points: req.n_points,
+    };
+
+    let mut rx = data.transform_rx.lock().await;
+    if data.transform_tx.send(cmd).await.is_err() {
+        return HttpResponse::InternalServerError().json(
+            ApiResponse::<()>::err("Transform channel send failed"));
+    }
+
+    match timeout(Duration::from_millis(CHANNEL_TIMEOUT_MS), rx.recv()).await {
+        Ok(Some(TransformEvent::TrajectoryComputed { points })) => {
+            HttpResponse::Ok().json(ApiResponse::ok(points))
+        }
+        Ok(Some(TransformEvent::Error { message })) => {
+            HttpResponse::InternalServerError().json(
+                ApiResponse::<()>::err(format!("Transform: {}", message)))
+        }
+        Err(_) => HttpResponse::RequestTimeout().json(
+            ApiResponse::<()>::err("Transform timeout")),
+        _ => HttpResponse::InternalServerError().json(
+            ApiResponse::<()>::err("Unexpected transform event")),
+    }
 }
 
 // ============================================================
@@ -165,7 +285,7 @@ async fn api_snr(data: web::Data<Arc<AppState>>) -> impl Responder {
 }
 
 // ============================================================
-// 贝叶斯匹配 API
+// 贝叶斯匹配 API (通过 transient_matcher 模块)
 // ============================================================
 
 #[get("/match/{guest_id}")]
@@ -174,15 +294,13 @@ async fn api_get_matches(
     guest_id: web::Path<i64>,
 ) -> impl Responder {
     let gid = guest_id.into_inner();
-    // 若数据库已有结果直接返回
     match db::get_match_results(&data.pool, gid).await {
         Ok(list) if !list.is_empty() => {
             HttpResponse::Ok().json(ApiResponse::ok(list))
         }
         _ => {
-            // 没有就实时计算
-            match run_match_internal(&data, gid).await {
-                Ok(candidates) => HttpResponse::Ok().json(ApiResponse::ok(candidates)),
+            match run_match_via_matcher(&data, gid, 20).await {
+                Ok((candidates, _)) => HttpResponse::Ok().json(ApiResponse::ok(candidates)),
                 Err(e) => HttpResponse::InternalServerError().json(ApiResponse::<()>::err(e)),
             }
         }
@@ -197,51 +315,94 @@ async fn api_run_match(
 ) -> impl Responder {
     let gid = guest_id.into_inner();
     let top_k = query.top_k.unwrap_or(10);
-    match run_match_full(&data, gid, top_k).await {
-        Ok(resp) => HttpResponse::Ok().json(ApiResponse::ok(resp)),
-        Err(e) => HttpResponse::InternalServerError().json(ApiResponse::<()>::err(e)),
+    match run_match_via_matcher(&data, gid, top_k).await {
+        Ok((candidates, method)) => {
+            let guest = db::get_guest_for_match(&data.pool, gid).await.ok().flatten();
+            Ok(serde_json::json!({
+                "guest": guest,
+                "candidates": candidates,
+                "method": method,
+            }))
+        }
+        Err(e) => Err(e),
+    }.map_or_else(
+        |e| HttpResponse::InternalServerError().json(ApiResponse::<()>::err(e)),
+        |v| HttpResponse::Ok().json(ApiResponse::ok(v))
+    )
+}
+
+async fn run_match_via_matcher(
+    data: &web::Data<Arc<AppState>>,
+    guest_id: i64,
+    top_k: i32,
+) -> Result<(Vec<matching::MatchCandidate>, MatchMethodInfo), String> {
+    let guest = db::get_guest_for_match(&data.pool, guest_id).await?
+        .ok_or_else(|| "Guest star not found".to_string())?;
+    let snrs = db::list_snr_for_match(&data.pool).await?;
+
+    let cmd = MatchCommand::RunMatch {
+        guest: guest.clone(),
+        snrs: snrs.clone(),
+        top_k,
+    };
+
+    let mut rx = data.match_rx.lock().await;
+    data.match_tx.send(cmd).await
+        .map_err(|_| "Matcher channel send failed".to_string())?;
+
+    match timeout(Duration::from_millis(CHANNEL_TIMEOUT_MS), rx.recv()).await {
+        Ok(Some(MatchEvent::MatchCompleted { candidates, method, .. })) => {
+            let ver = env!("CARGO_PKG_VERSION");
+            let top20 = candidates.iter().take(20).cloned().collect::<Vec<_>>();
+            db::save_match_result(&data.pool, guest_id, &top20, ver).await.ok();
+            Ok((candidates, method))
+        }
+        Ok(Some(MatchEvent::Error { message })) => {
+            Err(format!("Matcher: {}", message))
+        }
+        Ok(None) => Err("Matcher channel closed".to_string()),
+        Err(_) => Err("Matcher timeout".to_string()),
+        _ => Err("Unexpected matcher event".to_string()),
     }
 }
 
-async fn run_match_internal(data: &web::Data<Arc<AppState>>, guest_id: i64)
-    -> Result<Vec<matching::MatchCandidate>, String>
-{
-    let guest = db::get_guest_for_match(&data.pool, guest_id).await?
-        .ok_or_else(|| "Guest star not found".to_string())?;
-    let snrs = db::list_snr_for_match(&data.pool).await?;
-    let mut result = run_bayesian_match(&guest, &snrs, &data.match_cfg);
-    if result.is_empty() { return Ok(result); }
-    // 保存结果
-    let ver = env!("CARGO_PKG_VERSION");
-    let top = result.iter().take(20).cloned().collect::<Vec<_>>();
-    db::save_match_result(&data.pool, guest_id, &top, ver).await.ok();
-    Ok(result)
-}
+// ============================================================
+// 响应构造
+// ============================================================
 
-async fn run_match_full(data: &web::Data<Arc<AppState>>, guest_id: i64, top_k: i32)
-    -> Result<serde_json::Value, String>
-{
-    let guest = db::get_guest_for_match(&data.pool, guest_id).await?
-        .ok_or_else(|| "Guest star not found".to_string())?;
-    let snrs = db::list_snr_for_match(&data.pool).await?;
-    let mut result = run_bayesian_match(&guest, &snrs, &data.match_cfg);
-    result.truncate(top_k.max(5) as usize);
-    let ver = env!("CARGO_PKG_VERSION");
-    let top20 = result.iter().take(20).cloned().collect::<Vec<_>>();
-    db::save_match_result(&data.pool, guest_id, &top20, ver).await.ok();
-
-    Ok(serde_json::json!({
-        "guest": guest,
-        "candidates": result,
-        "method": {
-            "name": "Bayesian Spatial-Temporal Matching v2",
-            "version": ver,
-            "model": "IAU 2006 precession + Galactic disk prior + Student-t likelihood",
-            "prior_model": "Exponential disk (R_d=4 kpc) + isothermal disk (z_d=50 pc)",
-            "n_candidates_evaluated": snrs.len(),
-            "n_candidates_returned": result.len(),
+fn build_convert_response(r: &TransformResult) -> serde_json::Value {
+    serde_json::json!({
+        "ancient_equatorial": {
+            "ra_deg": r.ancient_ra,
+            "dec_deg": r.ancient_dec,
+        },
+        "j2000": {
+            "ra_deg": r.ra_j2000,
+            "dec_deg": r.dec_j2000,
+            "without_proper_motion": {
+                "ra_deg": r.ra_without_pm,
+                "dec_deg": r.dec_without_pm,
+            }
+        },
+        "precession_matrix": r.precession_matrix,
+        "corrections": {
+            "nutation_psi_arcsec": r.nutation_correction[0],
+            "nutation_eps_arcsec": r.nutation_correction[1],
+            "planetary_chi_arcsec": r.planetary_correction_arcsec,
+        },
+        "proper_motion_1000yr": {
+            "dra_deg": r.proper_motion_arrow[0],
+            "ddec_deg": r.proper_motion_arrow[1],
+            "position_angle_deg": r.proper_motion_arrow[2],
+        },
+        "error_estimate": {
+            "ra_arcsec": r.error_estimate.ra_error_arcsec,
+            "dec_arcsec": r.error_estimate.dec_error_arcsec,
+            "model_arcsec": r.error_estimate.model_error_arcsec,
+            "observation_arcsec": r.error_estimate.observation_error_arcsec,
+            "proper_motion_arcsec": r.error_estimate.proper_motion_error_arcsec,
         }
-    }))
+    })
 }
 
 // ============================================================
@@ -253,20 +414,58 @@ async fn main() -> std::io::Result<()> {
     dotenv::dotenv().ok();
     env_logger::init();
 
+    println!("======================================================");
+    println!("  Ancient Star Catalog Backend v{}", env!("CARGO_PKG_VERSION"));
+    println!("  Architecture: 3-modules + tokio channels");
+    println!("======================================================");
+
+    let config_dir = env::var("CONFIG_DIR").unwrap_or_else(|_| "./config".into());
+    let config = match config::AppConfig::load(&config_dir) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Failed to load config from {}: {}", config_dir, e);
+            eprintln!("Make sure config/precession.json, config/matching.json, config/catalog.json exist");
+            return Err(std::io::Error::new(std::io::ErrorKind::Other, e));
+        }
+    };
+    println!("  Config loaded from: {}", config_dir);
+    println!("  - Precession: {}", config.precession.model_name);
+    println!("  - Matching:   {}", config.matching.model_name);
+    println!("  - Catalog:    {}", config.catalog.model_name);
+
     let host = env::var("API_HOST").unwrap_or_else(|_| "127.0.0.1".into());
     let port: u16 = env::var("API_PORT").ok()
         .and_then(|s| s.parse().ok()).unwrap_or(8080);
 
     let pool = db::create_pool().expect("Failed to create DB pool");
-    let match_cfg = MatchConfig::default();
-    let state = Arc::new(AppState { pool, match_cfg });
 
-    println!("======================================================");
-    println!("  Ancient Star Catalog Backend v{}", env!("CARGO_PKG_VERSION"));
-    println!("======================================================");
-    println!("  修复 1: IAU 2006 岁差模型 + 行星摄动修正");
-    println!("  修复 2: 贝叶斯先验 → 银河系分布模型");
-    println!("  修复 3: 前端 Planck 黑体辐射色温映射");
+    // 启动 3 个子模块
+    println!();
+    println!("  Spawning modules...");
+    let (loader_tx, loader_rx) = catalog_loader::spawn_loader(
+        config.catalog.clone());
+    println!("  ✅ catalog_loader started (DB import + cleaning)");
+
+    let (transform_tx, transform_rx) = coordinate_transformer::spawn_transformer(
+        config.precession.clone());
+    println!("  ✅ coordinate_transformer started (IAU 2006 + error estimate)");
+
+    let (match_tx, match_rx) = transient_matcher::spawn_matcher(
+        config.matching.clone());
+    println!("  ✅ transient_matcher started (Galactic prior Bayes)");
+
+    let state = Arc::new(AppState {
+        pool,
+        config,
+        loader_tx,
+        loader_rx: Arc::new(Mutex::new(loader_rx)),
+        transform_tx,
+        transform_rx: Arc::new(Mutex::new(transform_rx)),
+        match_tx,
+        match_rx: Arc::new(Mutex::new(match_rx)),
+    });
+
+    println!();
     println!("======================================================");
     println!("  API: http://{}:{}", host, port);
     println!("======================================================");
