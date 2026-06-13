@@ -11,7 +11,6 @@ class UI {
         this.compareDynasty = null;
         this.compareMode = false;
 
-        // 绑定事件
         this._bindTopBar();
         this._bindFilters();
         this._bindPanels();
@@ -24,7 +23,6 @@ class UI {
 
     setMansions(list) {
         this.mansions = list;
-        // 填充星官选择 (这里用星宿代替)
         const sel = document.getElementById('constellation-select');
         if (sel) {
             list.forEach(m => {
@@ -36,71 +34,46 @@ class UI {
         }
     }
 
-    // ============================================================
-    // 顶部控制栏
-    // ============================================================
-
     _bindTopBar() {
-        // 视图切换
         document.querySelectorAll('.view-toggle button').forEach(btn => {
             btn.addEventListener('click', () => {
                 document.querySelectorAll('.view-toggle button').forEach(b => b.classList.remove('active'));
                 btn.classList.add('active');
                 const mode = btn.dataset.view;
                 this.sf.setViewMode(mode);
-                if (mode === 'compare') {
-                    this._enableCompareMode(true);
-                } else {
-                    this._enableCompareMode(false);
-                }
+                this._enableCompareMode(mode === 'compare');
             });
         });
 
-        // 显示选项
         const displaySel = document.getElementById('display-select');
-        if (displaySel) {
-            displaySel.addEventListener('change', () => {
-                this.sf.setDisplayFilter(displaySel.value);
-            });
-        }
+        if (displaySel) displaySel.addEventListener('change', () => {
+            this.sf.setDisplayFilter(displaySel.value);
+        });
 
-        // 星图风格
         const styleSel = document.getElementById('style-select');
-        if (styleSel) {
-            styleSel.addEventListener('change', () => {
-                this.sf.setStyleMode(styleSel.value);
-            });
-        }
+        if (styleSel) styleSel.addEventListener('change', () => {
+            this.sf.setStyleMode(styleSel.value);
+        });
 
-        // 亮度阈值
         const magSlider = document.getElementById('mag-threshold');
-        if (magSlider) {
-            magSlider.addEventListener('input', () => {
-                const v = parseFloat(magSlider.value);
-                this.sf.setMagThreshold(v);
-            });
-        }
+        if (magSlider) magSlider.addEventListener('input', () => {
+            this.sf.setMagThreshold(parseFloat(magSlider.value));
+        });
     }
-
-    // ============================================================
-    // 筛选面板
-    // ============================================================
 
     _bindFilters() {
         const updateList = () => {
             const params = {};
+            if (this.currentDynasty?.id != null) params.dynasty_id = this.currentDynasty.id;
             const book = document.getElementById('source-book-select')?.value;
             const cons = document.getElementById('constellation-select')?.value;
             const q = parseInt(document.getElementById('quality-select')?.value || '0');
             const search = document.getElementById('star-search')?.value?.trim();
-
-            if (this.currentDynasty?.id != null) params.dynasty_id = this.currentDynasty.id;
             if (book) params.source_book = book;
             if (cons) params.constellation = cons;
             if (q > 0) params.quality_min = q;
             if (search) params.star_name = '%' + search + '%';
             params.limit = 100;
-
             this._refreshStarList(params);
         };
 
@@ -108,7 +81,6 @@ class UI {
             const el = document.getElementById(id);
             if (el) el.addEventListener('change', updateList);
         });
-
         const searchEl = document.getElementById('star-search');
         if (searchEl) {
             let t;
@@ -123,18 +95,12 @@ class UI {
         const listEl = document.getElementById('stars-list');
         if (!listEl) return;
         listEl.innerHTML = '<div style="text-align:center;color:#8090b0;padding:20px;">加载中...</div>';
-
         try {
             const data = await window.api.getStars(params);
-            if (!data || !Array.isArray(data)) {
+            if (!data || !Array.isArray(data) || data.length === 0) {
                 listEl.innerHTML = '<div style="text-align:center;color:#8090b0;padding:20px;">暂无数据</div>';
                 return;
             }
-            if (data.length === 0) {
-                listEl.innerHTML = '<div style="text-align:center;color:#8090b0;padding:20px;">未找到匹配的恒星</div>';
-                return;
-            }
-
             listEl.innerHTML = '';
             data.slice(0, 80).forEach(s => {
                 const item = document.createElement('div');
@@ -149,9 +115,7 @@ class UI {
                     item.classList.add('active');
                     const ra = s.ra_j2000 ?? s.ra_ancient_conv;
                     const dec = s.dec_j2000 ?? s.dec_ancient_conv;
-                    if (ra != null && dec != null) {
-                        this.sf.flyTo(ra, dec, 2.5);
-                    }
+                    if (ra != null && dec != null) this.sf.flyTo(ra, dec, 2.5);
                     this._showStarDetail(s);
                 });
                 listEl.appendChild(item);
@@ -162,50 +126,37 @@ class UI {
                 more.textContent = `共 ${data.length} 条，仅显示前 80 条`;
                 listEl.appendChild(more);
             }
+            const cntEl = document.getElementById('star-count');
+            if (cntEl) cntEl.textContent = `(${data.length})`;
         } catch (e) {
             listEl.innerHTML = `<div style="text-align:center;color:#c08080;padding:20px;">加载失败: ${e.message}</div>`;
         }
     }
 
-    // ============================================================
-    // 朝代时间轴
-    // ============================================================
-
     _renderTimeline() {
         const container = document.getElementById('dynasty-timeline');
         if (!container) return;
-
         container.innerHTML = '';
         const barWrap = document.createElement('div');
         barWrap.className = 'dynasty-bar-container';
         container.appendChild(barWrap);
 
-        this.dynasties.forEach((d, idx) => {
+        this.dynasties.forEach(d => {
             const bar = document.createElement('div');
             const cls = Astro.DYNASTY_STYLES[d.name_cn] || 'other';
             bar.className = `dynasty-bar ${cls}`;
             bar.dataset.id = d.id;
-
-            // 计算年份显示
             const sYr = d.start_year < 0 ? `前${-d.start_year}` : d.start_year;
             const eYr = d.end_year < 0 ? `前${-d.end_year}` : d.end_year;
             bar.innerHTML = `
-                <div class="dynasty-stars-count" style="display:none;"></div>
                 ${d.name_cn}
                 <div class="year-range">${sYr}~${eYr}</div>
             `;
-
-            bar.addEventListener('click', () => {
-                this._onDynastyClick(d, bar);
-            });
-            bar.addEventListener('dblclick', () => {
-                this._toggleCompareDynasty(d, bar);
-            });
-
+            bar.addEventListener('click', () => this._onDynastyClick(d, bar));
+            bar.addEventListener('dblclick', () => this._toggleCompareDynasty(d, bar));
             barWrap.appendChild(bar);
         });
 
-        // 默认选择宋代
         const song = this.dynasties.find(d => d.name_cn === '宋');
         if (song) {
             const songBar = barWrap.querySelector(`[data-id="${song.id}"]`);
@@ -221,10 +172,7 @@ class UI {
         });
         if (barEl) barEl.classList.add('active');
         this._updateTimelineInfo();
-        if (window.onDynastyChange) {
-            window.onDynastyChange(dynasty);
-        }
-        // 刷新列表
+        if (window.onDynastyChange) window.onDynastyChange(dynasty);
         this._refreshStarList({ dynasty_id: dynasty.id, limit: 100 });
     }
 
@@ -241,17 +189,13 @@ class UI {
             if (barEl) barEl.classList.add('comparing');
         }
         this._updateTimelineInfo();
-        if (window.onCompareChange) {
-            window.onCompareChange(this.compareDynasty);
-        }
+        if (window.onCompareChange) window.onCompareChange(this.compareDynasty);
     }
 
     _enableCompareMode(enabled) {
         this.compareMode = enabled;
         const overlay = document.querySelector('.compare-overlay');
-        if (overlay) {
-            overlay.classList.toggle('active', enabled);
-        }
+        if (overlay) overlay.classList.toggle('active', enabled);
         const btn = document.getElementById('compare-btn');
         if (btn) {
             btn.classList.toggle('active', enabled);
@@ -265,59 +209,39 @@ class UI {
         let txt = `当前：${this.currentDynasty?.name_cn || '-'} `;
         if (this.currentDynasty) {
             const yr = this.currentDynasty.canonical_epoch;
-            txt += `· 公元 ${yr < 0 ? '前' + (-yr.toFixed(0)) : yr.toFixed(0)} 年`;
+            txt += `· 公元 ${yr < 0 ? '前' + (-yr | 0) : (yr | 0)} 年`;
         }
-        if (this.compareDynasty) {
-            txt += `  |  对比：${this.compareDynasty.name_cn}`;
-        }
+        if (this.compareDynasty) txt += `  |  对比：${this.compareDynasty.name_cn}`;
         info.textContent = txt;
     }
 
-    // ============================================================
-    // 面板控制
-    // ============================================================
-
     _bindPanels() {
-        // 对比按钮
         const btn = document.getElementById('compare-btn');
-        if (btn) {
-            btn.addEventListener('click', () => {
-                this._enableCompareMode(!this.compareMode);
-                const viewCompare = document.querySelector('[data-view="compare"]');
-                if (viewCompare) {
-                    document.querySelectorAll('.view-toggle button').forEach(b => b.classList.remove('active'));
-                    if (this.compareMode) viewCompare.classList.add('active');
-                    else document.querySelector('[data-view="sphere"]').classList.add('active');
-                }
-                this.sf.setViewMode(this.compareMode ? 'compare' : 'sphere');
-            });
-        }
+        if (btn) btn.addEventListener('click', () => {
+            this._enableCompareMode(!this.compareMode);
+            const viewCompare = document.querySelector('[data-view="compare"]');
+            if (viewCompare) {
+                document.querySelectorAll('.view-toggle button').forEach(b => b.classList.remove('active'));
+                if (this.compareMode) viewCompare.classList.add('active');
+                else document.querySelector('[data-view="sphere"]').classList.add('active');
+            }
+            this.sf.setViewMode(this.compareMode ? 'compare' : 'sphere');
+        });
     }
-
-    // ============================================================
-    // 恒星详情面板
-    // ============================================================
 
     async _showStarDetail(star) {
         const panel = document.getElementById('detail-panel');
         const content = document.getElementById('detail-content');
         if (!panel || !content) return;
         panel.style.display = 'flex';
-
         document.getElementById('dynasty-tag').textContent = star.dynasty_name || '-';
-
-        content.innerHTML = `
-            <div style="text-align:center;color:#8090b0;padding:20px;">加载详情中...</div>
-        `;
+        document.getElementById('detail-title').textContent = star.star_name_cn || '恒星详情';
+        content.innerHTML = `<div style="text-align:center;color:#8090b0;padding:20px;">加载详情中...</div>`;
 
         try {
-            // 请求跨朝代对比
             let crossData = [];
-            try {
-                crossData = await window.api.getCrossDynasty(star.id) || [];
-            } catch (e) { /* ignore */ }
+            try { crossData = await window.api.getCrossDynasty(star.id) || []; } catch(_) {}
 
-            // 请求坐标转换 (古代 -> J2000)
             let convData = null;
             if (star.ruxiu_du != null && star.quji_du != null && star.mansion_order) {
                 try {
@@ -329,10 +253,9 @@ class UI {
                         pm_ra_mas: star.proper_motion_ra,
                         pm_dec_mas: star.proper_motion_dec,
                     });
-                } catch (e) { /* ignore */ }
+                } catch(_) {}
             }
 
-            // 请求自行轨迹
             let trajData = null;
             if (star.ra_j2000 != null && star.proper_motion_ra != null) {
                 try {
@@ -341,25 +264,28 @@ class UI {
                         dec_j2000: star.dec_j2000,
                         pm_ra_mas: star.proper_motion_ra,
                         pm_dec_mas: star.proper_motion_dec,
-                        year_start: -200,
-                        year_end: 2500,
-                        n_points: 50,
+                        year_start: -200, year_end: 2500, n_points: 50,
                     });
-                } catch (e) { /* ignore */ }
+                } catch(_) {}
             }
 
-            content.innerHTML = this._renderStarDetailHTML(star, convData, trajData, crossData);
+            // ★ 修复 3: 前端用 Planck 色温显示色温信息
+            const col = Astro.starToColor(star, 'planck');
+
+            content.innerHTML = this._renderDetailHTML(star, convData, trajData, crossData, col);
         } catch (e) {
             content.innerHTML = `<div style="color:#c08080;padding:20px;">加载失败: ${e.message}</div>`;
         }
     }
 
-    _renderStarDetailHTML(star, conv, traj, cross) {
+    _renderDetailHTML(star, conv, traj, cross, colorInfo) {
         const modernRa = star.ra_j2000 != null ? star.ra_j2000.toFixed(4) + '°' : '-';
         const modernDec = star.dec_j2000 != null ? star.dec_j2000.toFixed(4) + '°' : '-';
         const raH = star.ra_j2000 != null ? (star.ra_j2000 / 15).toFixed(3) + 'h' : '-';
-        const deltaRa = (conv && star.ra_j2000 != null) ? (conv.with_proper_motion[0] - star.ra_j2000).toFixed(3) : null;
-        const deltaDec = (conv && star.dec_j2000 != null) ? (conv.with_proper_motion[1] - star.dec_j2000).toFixed(3) : null;
+        const deltaRa = (conv && star.ra_j2000 != null)
+            ? (conv.with_proper_motion[0] - star.ra_j2000).toFixed(3) : null;
+        const deltaDec = (conv && star.dec_j2000 != null)
+            ? (conv.with_proper_motion[1] - star.dec_j2000).toFixed(3) : null;
 
         let crossHTML = '';
         if (cross && cross.length > 0) {
@@ -397,8 +323,11 @@ class UI {
             ? Math.sqrt(star.proper_motion_ra ** 2 + star.proper_motion_dec ** 2).toFixed(2)
             : '-';
         const pmAngleDeg = (star.proper_motion_ra != null && star.proper_motion_dec != null)
-            ? Math.atan2(star.proper_motion_dec, star.proper_motion_ra) * 180 / Math.PI
-            : 0;
+            ? Math.atan2(star.proper_motion_dec, star.proper_motion_ra) * 180 / Math.PI : 0;
+
+        // 颜色温度显示
+        const tempStr = colorInfo && colorInfo.temp ? `${Math.round(colorInfo.temp)} K` : '-';
+        const hexStr = colorInfo && colorInfo.hex ? colorInfo.hex : '#fff';
 
         return `
             <div class="detail-section">
@@ -410,8 +339,14 @@ class UI {
                     <div class="info-item"><span class="key">典籍：</span><span class="value">${star.source_book || '-'}</span></div>
                     <div class="info-item"><span class="key">古代星等：</span><span class="value">${star.magnitude_ancient || '-'}</span></div>
                     <div class="info-item"><span class="key">目视星等：</span><span class="value">${star.magnitude_num != null ? star.magnitude_num.toFixed(2) : '-'}</span></div>
-                    <div class="info-item"><span class="key">颜色描述：</span><span class="value">${star.color_desc || '-'}</span></div>
-                    <div class="info-item"><span class="key">光谱型：</span><span class="value">${star.color_class || '-'}</span></div>
+                    <div class="info-item"><span class="key">古代描述：</span><span class="value">${star.color_desc || '-'}</span></div>
+                    <div class="info-item">
+                        <span class="key">现代色温：</span>
+                        <span class="value" style="display:flex;align-items:center;gap:6px;">
+                            <span style="width:12px;height:12px;border-radius:50%;background:${hexStr};box-shadow:0 0 4px ${hexStr};"></span>
+                            ${tempStr}
+                        </span>
+                    </div>
                 </div>
             </div>
 
@@ -429,12 +364,12 @@ class UI {
                         <div class="label">${conv?.quji_raw_cn || ''}</div>
                     </div>
                     <div class="coord-card ancient">
-                        <h4>古代赤经 (换算)</h4>
+                        <h4>古代赤经</h4>
                         <div class="value">${conv?.ancient_ra?.toFixed?.(4) || '-'}°</div>
                         <div class="label">历元 ${this.currentDynasty?.canonical_epoch || '-'}</div>
                     </div>
                     <div class="coord-card ancient">
-                        <h4>古代赤纬 (换算)</h4>
+                        <h4>古代赤纬</h4>
                         <div class="value">${conv?.ancient_dec?.toFixed?.(4) || '-'}°</div>
                         <div class="label">δ = 90° - 去极度</div>
                     </div>
@@ -445,12 +380,12 @@ class UI {
                 <h3>现代坐标 (J2000.0) 与偏差</h3>
                 <div class="coord-grid">
                     <div class="coord-card modern">
-                        <h4>证认赤经 RA</h4>
+                        <h4>证认 RA</h4>
                         <div class="value">${modernRa}</div>
                         <div class="label">${raH}</div>
                     </div>
                     <div class="coord-card modern">
-                        <h4>证认赤纬 Dec</h4>
+                        <h4>证认 Dec</h4>
                         <div class="value">${modernDec}</div>
                         <div class="label">J2000.0</div>
                     </div>
@@ -459,15 +394,33 @@ class UI {
                         <div class="value" style="color:${deltaRa && Math.abs(deltaRa) < 1 ? '#80c080' : '#c08080'}">
                             ${deltaRa != null ? (deltaRa >= 0 ? '+' : '') + deltaRa + '°' : '-'}
                         </div>
-                        <div class="label">精度 ${deltaRa != null ? (Math.abs(deltaRa) * 3600).toFixed(1) + '"' : '-'}</div>
+                        <div class="label">角秒: ${deltaRa != null ? (Math.abs(deltaRa) * 3600).toFixed(1) + '"' : '-'}</div>
                     </div>
                     <div class="coord-card modern">
                         <h4>ΔDec (转换-证认)</h4>
                         <div class="value" style="color:${deltaDec && Math.abs(deltaDec) < 1 ? '#80c080' : '#c08080'}">
                             ${deltaDec != null ? (deltaDec >= 0 ? '+' : '') + deltaDec + '°' : '-'}
                         </div>
-                        <div class="label">精度 ${deltaDec != null ? (Math.abs(deltaDec) * 3600).toFixed(1) + '"' : '-'}</div>
+                        <div class="label">角秒: ${deltaDec != null ? (Math.abs(deltaDec) * 3600).toFixed(1) + '"' : '-'}</div>
                     </div>
+                </div>
+            </div>
+
+            <div class="detail-section">
+                <h3>岁差 / 章动 修正量 (IAU 2006)</h3>
+                <div class="info-grid">
+                    <div class="info-item"><span class="key">行星摄动χ:</span><span class="value">
+                        ${conv?.planetary_correction_arcsec != null ? conv.planetary_correction_arcsec.toFixed(4) + '"' : '-'}
+                    </span></div>
+                    <div class="info-item"><span class="key">章动Δψ:</span><span class="value">
+                        ${conv?.nutation_correction?.[0] != null ? conv.nutation_correction[0].toFixed(3) + '"' : '-'}
+                    </span></div>
+                    <div class="info-item"><span class="key">章动Δε:</span><span class="value">
+                        ${conv?.nutation_correction?.[1] != null ? conv.nutation_correction[1].toFixed(3) + '"' : '-'}
+                    </span></div>
+                    <div class="info-item"><span class="key">总精度:</span><span class="value">
+                        <span style="color:#80ff80;">★ IAU 2006</span>
+                    </span></div>
                 </div>
             </div>
 
@@ -505,7 +458,6 @@ class UI {
     }
 }
 
-// 全局辅助函数 (由 HTML 调用)
 window.toggleSidePanel = () => {
     const p = document.getElementById('side-panel');
     const b = document.getElementById('fab-side-toggle');
