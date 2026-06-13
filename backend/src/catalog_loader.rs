@@ -13,6 +13,7 @@ use crate::config::CatalogConfig;
 use crate::models::{AncientStar, AncientComet, GuestStar};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
+use tracing::info;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum LoaderCommand {
@@ -76,7 +77,7 @@ impl CatalogLoader {
     }
 
     pub async fn run(mut self) {
-        log::info!("CatalogLoader started");
+        info!("CatalogLoader started");
         while let Some(cmd) = self.cmd_rx.recv().await {
             match cmd {
                 LoaderCommand::CleanStars { stars } => {
@@ -84,7 +85,7 @@ impl CatalogLoader {
                         .map(|s| self.clean_star(s))
                         .collect();
                     let n = cleaned.len();
-                    log::info!("CatalogLoader: cleaned {} stars", n);
+                    info!("CatalogLoader: cleaned {} stars", n);
                     let _ = self.event_tx.send(LoaderEvent::StarsCleaned {
                         count: n, records: cleaned,
                     }).await;
@@ -100,7 +101,7 @@ impl CatalogLoader {
                     }).await;
                 }
                 LoaderCommand::Shutdown => {
-                    log::info!("CatalogLoader shutting down");
+                    info!("CatalogLoader shutting down");
                     let _ = self.event_tx.send(LoaderEvent::ShutdownAck).await;
                     break;
                 }
