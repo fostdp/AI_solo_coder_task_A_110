@@ -3,6 +3,7 @@
 use deadpool_postgres::{Config, PoolConfig, Runtime, ManagerConfig, RecyclingMethod};
 use tokio_postgres::{NoTls, Row, types::ToSql};
 use std::env;
+use tracing::{info, trace, error};
 
 pub use deadpool_postgres::Pool as DbPool;
 
@@ -24,7 +25,19 @@ pub fn create_pool() -> Result<DbPool, String> {
     });
     cfg.pool = Some(PoolConfig::new(max_conn));
 
-    cfg.create_pool(Some(Runtime::Tokio1), NoTls).map_err(|e| e.to_string())
+    info!(
+        "DB: Creating connection pool for {}:{}/{} (max_conn={})",
+        cfg.host.as_deref().unwrap_or("?"),
+        cfg.port.unwrap_or(5432),
+        cfg.dbname.as_deref().unwrap_or("?"),
+        max_conn
+    );
+    let pool = cfg.create_pool(Some(Runtime::Tokio1), NoTls).map_err(|e| {
+        error!("DB: Failed to create pool: {}", e);
+        e.to_string()
+    })?;
+    info!("DB: Connection pool created successfully");
+    Ok(pool)
 }
 
 // ============================================================
@@ -217,10 +230,12 @@ fn row_to_cross(r: &Row) -> CrossDynastyPair {
 // ============================================================
 
 pub async fn list_dynasties(pool: &DbPool) -> Result<Vec<Dynasty>, String> {
+    trace!("DB: list_dynasties");
     let client = pool.get().await.map_err(|e| e.to_string())?;
     let rows = client.query(
         "SELECT * FROM dynasties ORDER BY start_year", &[]).await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| { error!("DB: list_dynasties query error: {}", e); e.to_string() })?;
+    trace!("DB: list_dynasties returned {} rows", rows.len());
     Ok(rows.iter().map(row_to_dynasty).collect())
 }
 
@@ -235,6 +250,10 @@ pub async fn list_mansions(pool: &DbPool) -> Result<Vec<LunarMansion>, String> {
 pub async fn query_stars(pool: &DbPool, params: &StarQueryParams)
     -> Result<(Vec<AncientStar>, i64), String>
 {
+    trace!(
+        "DB: query_stars dynasty={:?} mansion={:?} name={:?} limit={:?}",
+        params.dynasty_id, params.mansion_id, params.star_name, params.limit
+    );
     let mut sql = String::from(
         "SELECT s.*, d.name_cn AS dynasty_name, m.name_cn AS mansion_name,
                 m.mansion_order AS mansion_order
@@ -331,7 +350,9 @@ pub async fn query_stars(pool: &DbPool, params: &StarQueryParams)
     }
 
     let psql_ref2: Vec<&(dyn ToSql + Sync)> = psql.iter().map(|b| b.as_ref()).collect();
-    let rows = client.query(&sql, &psql_ref2).await.map_err(|e| e.to_string())?;
+    let rows = client.query(&sql, &psql_ref2).await
+        .map_err(|e| { error!("DB: query_stars error: {}", e); e.to_string() })?;
+    trace!("DB: query_stars returned {}/{} rows", rows.len(), count);
     Ok((rows.iter().map(row_to_star).collect(), count))
 }
 
@@ -441,10 +462,13 @@ pub async fn save_match_result(
     candidates: &[MatchCandidate],
     model_version: &str,
 ) -> Result<(), String> {
+    trace!(
+        "DB: save_match_result guest_id={} candidates={} version={}",
+        guest_id, candidates.len(), model_version
+    );
     let client = pool.get().await.map_err(|e| e.to_string())?;
-    // 先清除旧结果
     client.execute("DELETE FROM guest_star_matches WHERE guest_id = $1", &[&guest_id])
-        .await.map_err(|e| e.to_string())?;
+        .await.map_err(|e| { error!("DB: save_match_result delete error: {}", e); e.to_string() })?;
     for c in candidates {
         client.execute(
             "INSERT INTO guest_star_matches
@@ -458,8 +482,9 @@ pub async fn save_match_result(
               &c.log_prior, &c.bayes_factor, &c.angular_sep_arcmin,
               &c.time_delta_yr, &c.spatial_score, &c.temporal_score,
               &c.magnitude_score, &c.lightcurve_score, &model_version],
-        ).await.map_err(|e| e.to_string())?;
+        ).await.map_err(|e| { error!("DB: save_match_result insert error: {}", e); e.to_string() })?;
     }
+    info!("DB: save_match_result guest_id={} saved {} candidates", guest_id, candidates.len());
     Ok(())
 }
 
