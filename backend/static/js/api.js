@@ -1,116 +1,77 @@
 /* ============================================================
- * API 封装模块
+ * API 客户端封装
  * ============================================================ */
 
-const API_BASE = (window.location.protocol + '//' + window.location.hostname + ':8080')
-    || 'http://localhost:8080';
+const API_BASE = (() => {
+    const p = window.location.protocol;
+    const h = window.location.hostname;
+    const port = window.location.port === '8080' ? '8080' : '8080';
+    // 如果是 3000 等开发端口, 仍连接 8080 后端
+    return `${p}//${h}:${port}/api`;
+})();
 
-class ApiClient {
-    constructor(baseUrl) {
-        this.baseUrl = baseUrl || API_BASE;
-    }
-
-    async request(path, options = {}) {
-        const url = this.baseUrl + path;
-        const defaultOptions = {
-            headers: {
-                'Content-Type': 'application/json',
-                'Accept': 'application/json',
-            },
-            mode: 'cors',
+const api = {
+    async _json(url, method = 'GET', body = null) {
+        const opts = {
+            method,
+            headers: { 'Content-Type': 'application/json' },
         };
-        const opts = { ...defaultOptions, ...options };
-        if (options.body && typeof options.body !== 'string') {
-            opts.body = JSON.stringify(options.body);
+        if (body) opts.body = JSON.stringify(body);
+        const resp = await fetch(url, opts);
+        if (!resp.ok) {
+            const t = await resp.text();
+            throw new Error(`HTTP ${resp.status}: ${t}`);
         }
-
-        try {
-            const resp = await fetch(url, opts);
-            const data = await resp.json();
-            if (data.success) {
-                return data.data;
-            } else {
-                throw new Error(data.error || data.message || 'API Error');
-            }
-        } catch (e) {
-            console.error('API request failed:', path, e);
-            throw e;
+        const json = await resp.json();
+        if (json.code !== undefined && json.code !== 0) {
+            throw new Error(json.message || 'API error');
         }
-    }
+        return json.data;
+    },
 
-    async health() {
-        return this.request('/api/health');
-    }
+    health() { return this._json(`${API_BASE}/health`); },
+    getDynasties() { return this._json(`${API_BASE}/dynasties`); },
+    getMansions() { return this._json(`${API_BASE}/mansions`); },
 
-    async getDynasties() {
-        return this.request('/api/dynasties');
-    }
-
-    async getMansions() {
-        return this.request('/api/mansions');
-    }
-
-    async getStars(params = {}) {
+    getStars(params = {}) {
         const q = new URLSearchParams();
-        Object.entries(params).forEach(([k, v]) => {
-            if (v !== undefined && v !== null && v !== '') {
-                q.append(k, v);
-            }
-        });
-        const path = '/api/stars' + (q.toString() ? '?' + q.toString() : '');
-        return this.request(path);
-    }
+        for (const [k, v] of Object.entries(params)) {
+            if (v != null && v !== '') q.set(k, v);
+        }
+        const s = q.toString();
+        return this._json(`${API_BASE}/stars${s ? '?' + s : ''}`);
+    },
 
-    async getStar(id) {
-        return this.request('/api/stars/' + id);
-    }
+    getStar(id) { return this._json(`${API_BASE}/stars/${id}`); },
 
-    async getComets(dynastyId) {
-        const q = dynastyId ? '?dynasty_id=' + dynastyId : '';
-        return this.request('/api/comets' + q);
-    }
+    getCrossDynasty(id) {
+        return this._json(`${API_BASE}/stars/${id}/cross-dynasty`);
+    },
 
-    async getGuestStars(dynastyId) {
-        const q = dynastyId ? '?dynasty_id=' + dynastyId : '';
-        return this.request('/api/guest-stars' + q);
-    }
+    convertRuxiuToJ2000(body) {
+        return this._json(`${API_BASE}/convert/ruxiu-to-j2000`, 'POST', body);
+    },
 
-    async getGuestStar(id) {
-        return this.request('/api/guest-stars/' + id);
-    }
+    getTrajectory(body) {
+        return this._json(`${API_BASE}/trajectory`, 'POST', body);
+    },
 
-    async getSnr() {
-        return this.request('/api/snr');
-    }
+    getComets() { return this._json(`${API_BASE}/comets`); },
 
-    async convertRuxiuToJ2000(payload) {
-        return this.request('/api/convert/ruxiu-to-j2000', {
-            method: 'POST',
-            body: payload,
-        });
-    }
+    getGuestStars() { return this._json(`${API_BASE}/guest-stars`); },
+    getGuest(id) { return this._json(`${API_BASE}/guest-stars/${id}`); },
 
-    async getTrajectory(payload) {
-        return this.request('/api/trajectory', {
-            method: 'POST',
-            body: payload,
-        });
-    }
+    getSnr() { return this._json(`${API_BASE}/snr`); },
 
-    async getCrossDynasty(starId) {
-        return this.request('/api/stars/' + starId + '/cross-dynasty');
-    }
+    runMatch(guestId, topK = 10) {
+        return this._json(
+            `${API_BASE}/match/${guestId}?top_k=${topK}`,
+            'POST'
+        );
+    },
+    getMatches(guestId) {
+        return this._json(`${API_BASE}/match/${guestId}`);
+    },
+};
 
-    async runMatch(guestId, topK = 20) {
-        return this.request('/api/match/' + guestId + '?top_k=' + topK, {
-            method: 'POST',
-        });
-    }
-
-    async getMatches(guestId) {
-        return this.request('/api/match/' + guestId);
-    }
-}
-
-// 全局单例
-window.api = new ApiClient();
+window.api = api;
