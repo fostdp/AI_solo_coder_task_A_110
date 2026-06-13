@@ -387,7 +387,7 @@ pub fn ancient_to_j2000_full(
 // ============================================================
 
 pub fn proper_motion_arrow(
-    ra_j2000: f64, dec_j2000: f64,
+    _ra_j2000: f64, dec_j2000: f64,
     pm_ra_mas: f64, pm_dec_mas: f64,
     scale_yr: f64,
 ) -> (f64, f64, f64) {
