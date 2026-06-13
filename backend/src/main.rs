@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! 古代星表数据数字化与现代天体物理验证系统
 //! Rust 后端 (Actix-Web) v0.3
 //!
@@ -16,6 +17,7 @@
 //!   - 作为 REST API 层 + 模块协调器
 
 mod config;
+mod telemetry;
 mod catalog_loader;
 mod coordinate_transformer;
 mod transient_matcher;
@@ -31,6 +33,7 @@ use std::env;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::time::{timeout, Duration};
+use tracing::{info, error};
 
 use config::AppConfig;
 use db::DbPool;
@@ -39,6 +42,7 @@ use astronomy::{RuxiuToJ2000Request, TrajectoryRequest};
 use catalog_loader::{LoaderCommand, LoaderEvent};
 use coordinate_transformer::{TransformCommand, TransformEvent, TransformResult};
 use transient_matcher::{MatchCommand, MatchEvent, MatchMethodInfo};
+use telemetry::MetricsRegistry;
 
 struct AppState {
     pool: DbPool,
@@ -49,6 +53,7 @@ struct AppState {
     transform_rx: Arc<Mutex<tokio::sync::mpsc::Receiver<TransformEvent>>>,
     match_tx: tokio::sync::mpsc::Sender<MatchCommand>,
     match_rx: Arc<Mutex<tokio::sync::mpsc::Receiver<MatchEvent>>>,
+    metrics: Arc<MetricsRegistry>,
 }
 
 const CHANNEL_TIMEOUT_MS: u64 = 30000;
@@ -70,6 +75,19 @@ async fn api_health(data: web::Data<Arc<AppState>>) -> impl Responder {
         },
         "architecture": "3-modules + channels (catalog_loader → coordinate_transformer → transient_matcher)",
     })))
+}
+
+#[get("/metrics")]
+async fn api_metrics(data: web::Data<Arc<AppState>>) -> impl Responder {
+    match data.metrics.encode_text() {
+        Ok(body) => HttpResponse::Ok()
+            .content_type("text/plain; version=0.0.4; charset=utf-8")
+            .body(body),
+        Err(e) => {
+            error!("Failed to encode metrics: {}", e);
+            HttpResponse::InternalServerError().body(e)
+        }
+    }
 }
 
 // ============================================================
@@ -412,26 +430,26 @@ fn build_convert_response(r: &TransformResult) -> serde_json::Value {
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     dotenv::dotenv().ok();
-    env_logger::init();
+    telemetry::init_tracing();
 
-    println!("======================================================");
-    println!("  Ancient Star Catalog Backend v{}", env!("CARGO_PKG_VERSION"));
-    println!("  Architecture: 3-modules + tokio channels");
-    println!("======================================================");
+    info!("======================================================");
+    info!("  Ancient Star Catalog Backend v{}", env!("CARGO_PKG_VERSION"));
+    info!("  Architecture: 3-modules + tokio channels");
+    info!("======================================================");
 
     let config_dir = env::var("CONFIG_DIR").unwrap_or_else(|_| "./config".into());
     let config = match config::AppConfig::load(&config_dir) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("Failed to load config from {}: {}", config_dir, e);
-            eprintln!("Make sure config/precession.json, config/matching.json, config/catalog.json exist");
+            error!("Failed to load config from {}: {}", config_dir, e);
+            error!("Make sure config/precession.json, config/matching.json, config/catalog.json exist");
             return Err(std::io::Error::new(std::io::ErrorKind::Other, e));
         }
     };
-    println!("  Config loaded from: {}", config_dir);
-    println!("  - Precession: {}", config.precession.model_name);
-    println!("  - Matching:   {}", config.matching.model_name);
-    println!("  - Catalog:    {}", config.catalog.model_name);
+    info!("  Config loaded from: {}", config_dir);
+    info!("  - Precession: {}", config.precession.model_name);
+    info!("  - Matching:   {}", config.matching.model_name);
+    info!("  - Catalog:    {}", config.catalog.model_name);
 
     let host = env::var("API_HOST").unwrap_or_else(|_| "127.0.0.1".into());
     let port: u16 = env::var("API_PORT").ok()
@@ -439,20 +457,21 @@ async fn main() -> std::io::Result<()> {
 
     let pool = db::create_pool().expect("Failed to create DB pool");
 
-    // 启动 3 个子模块
-    println!();
-    println!("  Spawning modules...");
+    let metrics = Arc::new(telemetry::register_metrics()
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?);
+
+    info!("Spawning modules...");
     let (loader_tx, loader_rx) = catalog_loader::spawn_loader(
         config.catalog.clone());
-    println!("  ✅ catalog_loader started (DB import + cleaning)");
+    info!("catalog_loader started (DB import + cleaning)");
 
     let (transform_tx, transform_rx) = coordinate_transformer::spawn_transformer(
         config.precession.clone());
-    println!("  ✅ coordinate_transformer started (IAU 2006 + error estimate)");
+    info!("coordinate_transformer started (IAU 2006 + error estimate)");
 
     let (match_tx, match_rx) = transient_matcher::spawn_matcher(
         config.matching.clone());
-    println!("  ✅ transient_matcher started (Galactic prior Bayes)");
+    info!("transient_matcher started (Galactic prior Bayes)");
 
     let state = Arc::new(AppState {
         pool,
@@ -463,12 +482,12 @@ async fn main() -> std::io::Result<()> {
         transform_rx: Arc::new(Mutex::new(transform_rx)),
         match_tx,
         match_rx: Arc::new(Mutex::new(match_rx)),
+        metrics: metrics.clone(),
     });
 
-    println!();
-    println!("======================================================");
-    println!("  API: http://{}:{}", host, port);
-    println!("======================================================");
+    info!("======================================================");
+    info!("  API: http://{}:{}", host, port);
+    info!("======================================================");
 
     HttpServer::new(move || {
         let cors = Cors::permissive();
@@ -478,6 +497,7 @@ async fn main() -> std::io::Result<()> {
             .service(
                 web::scope("/api")
                     .service(api_health)
+                    .service(api_metrics)
                     .service(api_dynasties)
                     .service(api_mansions)
                     .service(api_query_stars)
