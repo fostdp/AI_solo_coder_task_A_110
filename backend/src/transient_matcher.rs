@@ -13,6 +13,7 @@ use crate::matching::{GuestStarObs, SupernovaRemnant, MatchCandidate};
 use serde::{Deserialize, Serialize};
 use std::f64::consts::PI;
 use tokio::sync::mpsc;
+use tracing::info;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum MatchCommand {
@@ -333,7 +334,7 @@ impl TransientMatcher {
     }
 
     pub async fn run(mut self) {
-        log::info!("TransientMatcher started (Galactic prior model from config)");
+        info!("TransientMatcher started (Galactic prior model from config)");
         while let Some(cmd) = self.cmd_rx.recv().await {
             match cmd {
                 MatchCommand::RunMatch { guest, snrs, top_k } => {
@@ -346,7 +347,7 @@ impl TransientMatcher {
                     let _ = self.event_tx.send(event).await;
                 }
                 MatchCommand::Shutdown => {
-                    log::info!("TransientMatcher shutting down");
+                    info!("TransientMatcher shutting down");
                     let _ = self.event_tx.send(MatchEvent::ShutdownAck).await;
                     break;
                 }
