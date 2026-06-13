@@ -13,6 +13,7 @@ use crate::config::PrecessionConfig;
 use crate::catalog_loader::CleanedStarRecord;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
+use tracing::info;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TransformCommand {
@@ -127,7 +128,7 @@ impl CoordinateTransformer {
     }
 
     pub async fn run(mut self) {
-        log::info!("CoordinateTransformer started (IAU 2006 model from config)");
+        info!("CoordinateTransformer started (IAU 2006 model from config)");
         while let Some(cmd) = self.cmd_rx.recv().await {
             let event = match cmd {
                 TransformCommand::ConvertSingle {
@@ -146,7 +147,7 @@ impl CoordinateTransformer {
                     year_start, year_end, n_points,
                 ),
                 TransformCommand::Shutdown => {
-                    log::info!("CoordinateTransformer shutting down");
+                    info!("CoordinateTransformer shutting down");
                     TransformEvent::ShutdownAck
                 }
             };
