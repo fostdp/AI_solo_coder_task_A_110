@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>古代星表数据数字化与现代天体物理验证系统</title>
+    <link rel="stylesheet" href="css/style.css">
+    <!-- Three.js from CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/examples/js/controls/OrbitControls.js"></script>
+</head>
+<body>
+<div id="app">
+    <canvas id="star-canvas"></canvas>
+
+    <!-- 顶部控制栏 -->
+    <div class="top-bar">
+        <div class="app-title">
+            古代星表数字化验证系统
+            <span class="app-subtitle">Ancient Star Catalog Digitization System</span>
+        </div>
+        <div class="controls-group">
+            <div class="control-item">
+                <label>视图模式</label>
+                <div class="view-toggle">
+                    <button class="active" data-view="sphere">天球视图</button>
+                    <button data-view="plane">平面投影</button>
+                    <button data-view="compare">朝代对比</button>
+                </div>
+            </div>
+            <div class="control-item">
+                <label>星图风格</label>
+                <select id="style-select">
+                    <option value="ancient">古代风格</option>
+                    <option value="modern">现代风格</option>
+                    <option value="hybrid">混合对比</option>
+                </select>
+            </div>
+            <div class="control-item">
+                <label>显示选项</label>
+                <select id="display-select">
+                    <option value="all">全部显示</option>
+                    <option value="stars">仅恒星</option>
+                    <option value="comets">仅彗星</option>
+                    <option value="guests">仅客星</option>
+                    <option value="snr">超新星遗迹</option>
+                </select>
+            </div>
+            <div class="control-item">
+                <label>亮度阈值</label>
+                <input type="range" id="mag-threshold" min="-2" max="7" step="0.5" value="6.5"
+                       style="min-width: 120px;">
+            </div>
+        </div>
+    </div>
+
+    <!-- 左侧查询面板 -->
+    <div class="side-panel" id="side-panel">
+        <div class="panel-header">
+            <div class="panel-title">星表查询</div>
+            <button class="panel-close" onclick="toggleSidePanel()">×</button>
+        </div>
+        <div class="panel-body">
+            <div class="filter-group">
+                <label>典籍来源</label>
+                <select id="source-book-select">
+                    <option value="">全部典籍</option>
+                    <option value="甘石星经">甘石星经</option>
+                    <option value="史记·天官书">史记·天官书</option>
+                    <option value="开元占经">开元占经</option>
+                    <option value="宋史·天文志">宋史·天文志</option>
+                    <option value="仪象考成">仪象考成</option>
+                    <option value="历象考成">历象考成</option>
+                </select>
+            </div>
+            <div class="filter-group">
+                <label>星官/星宿</label>
+                <select id="constellation-select">
+                    <option value="">全部</option>
+                </select>
+            </div>
+            <div class="filter-group">
+                <label>质量等级</label>
+                <select id="quality-select">
+                    <option value="0">全部等级</option>
+                    <option value="3">高（3级）</option>
+                    <option value="2">中及以上（≥2级）</option>
+                    <option value="1">低及以上（≥1级）</option>
+                </select>
+            </div>
+            <div class="filter-group">
+                <label>搜索星名</label>
+                <input type="text" id="star-search" placeholder="输入星名...">
+            </div>
+
+            <div class="stars-list" id="stars-list">
+                <div style="text-align:center;color:#8090b0;padding:20px;">
+                    加载中...
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 右侧详情面板 -->
+    <div class="detail-panel" id="detail-panel" style="display:none;">
+        <div class="panel-header">
+            <div class="panel-title">恒星详情 <span class="delta-tag" id="dynasty-tag">宋代</span></div>
+            <button class="panel-close" onclick="closeDetailPanel()">×</button>
+        </div>
+        <div class="panel-body" id="detail-content">
+        </div>
+    </div>
+
+    <!-- 客星匹配面板 -->
+    <div class="match-panel" id="match-panel" style="display:none;">
+        <div class="panel-header">
+            <div class="panel-title">客星证认 · 贝叶斯匹配</div>
+            <button class="panel-close" onclick="closeMatchPanel()">×</button>
+        </div>
+        <div class="detail-section" style="padding:12px 16px 0;">
+            <h3 id="match-guest-name">客星名称</h3>
+            <div class="info-grid">
+                <div class="info-item">
+                    <span class="key">朝代：</span>
+                    <span class="value" id="match-guest-dynasty">-</span>
+                </div>
+                <div class="info-item">
+                    <span class="key">峰值星等：</span>
+                    <span class="value" id="match-guest-mag">-</span>
+                </div>
+                <div class="info-item">
+                    <span class="key">可见天数：</span>
+                    <span class="value" id="match-guest-days">-</span>
+                </div>
+                <div class="info-item">
+                    <span class="key">位置误差：</span>
+                    <span class="value" id="match-guest-err">-</span>
+                </div>
+            </div>
+        </div>
+        <div class="matches-list" id="matches-list">
+            <div style="text-align:center;color:#8090b0;padding:40px;">
+                点击客星查看贝叶斯匹配结果
+            </div>
+        </div>
+    </div>
+
+    <!-- 朝代时间轴 -->
+    <div class="timeline-container">
+        <div class="timeline-header">
+            <div class="timeline-title">
+                朝代时间轴
+                <span style="margin-left:10px;color:#8090b0;font-size:11px;">
+                    点击选择朝代，双击或按"对比模式"进行跨朝代比较
+                </span>
+            </div>
+            <div class="timeline-info" id="timeline-info">
+                当前：宋代 · 公元 1100 年 · 共 0 条记录
+            </div>
+        </div>
+        <div class="dynasty-timeline" id="dynasty-timeline">
+            <!-- 朝代条块由 JS 生成 -->
+        </div>
+        <button class="compare-btn" id="compare-btn" onclick="toggleCompareMode()">
+            对比模式
+        </button>
+    </div>
+
+    <!-- 图例 -->
+    <div class="legend" id="legend">
+        <div class="legend-item">
+            <div class="legend-symbol"><div class="legend-dot bright"></div></div>
+            <div class="legend-label">亮星（m < 2）</div>
+        </div>
+        <div class="legend-item">
+            <div class="legend-symbol"><div class="legend-dot medium"></div></div>
+            <div class="legend-label">中等星（m 2-4）</div>
+        </div>
+        <div class="legend-item">
+            <div class="legend-symbol"><div class="legend-dot faint"></div></div>
+            <div class="legend-label">暗星（m > 4）</div>
+        </div>
+        <div class="legend-item">
+            <div class="legend-symbol"><div class="legend-dot comet"></div></div>
+            <div class="legend-label">彗星</div>
+        </div>
+        <div class="legend-item">
+            <div class="legend-symbol"><div class="legend-dot guest"></div></div>
+            <div class="legend-label">客星（超新星候选）</div>
+        </div>
+        <div class="legend-item">
+            <div class="legend-symbol"><div class="legend-dot mansion"></div></div>
+            <div class="legend-label">二十八宿边界</div>
+        </div>
+    </div>
+
+    <!-- 加载中 -->
+    <div class="loading-indicator" id="loading" style="display:none;">
+        <div class="spinner"></div>
+        <div style="margin-top:10px;">加载星表数据...</div>
+    </div>
+
+    <!-- 自定义 tooltip -->
+    <div class="tooltip" id="tooltip" style="display:none;"></div>
+</div>
+
+<script src="js/api.js"></script>
+<script src="js/astro.js"></script>
+<script src="js/starfield.js"></script>
+<script src="js/ui.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
