@@ -1,381 +1,335 @@
 /* ============================================================
- * 星空渲染引擎 (Three.js)
- *  天球视图 / 平面投影 两种模式
- *  恒星、彗星、客星、超新星遗迹、二十八宿边界
- *  自行箭头标注、对比模式下的双坐标标记
+ * Three.js 星空渲染引擎
+ *  - 天球视图: 恒星/彗星/客星/遗迹/星宿边界/自行箭头
+ *  - Raycaster 射线拾取
+ *  - 鼠标拖拽旋转 + 滚轮缩放
  * ============================================================ */
 
 class StarField {
     constructor(canvasId) {
         this.canvas = document.getElementById(canvasId);
-        this.renderer = null;
+        this.labelsCanvas = document.getElementById('labels-canvas');
         this.scene = null;
         this.camera = null;
-        this.controls = null;
+        this.renderer = null;
 
-        this.starsGroup = null;
-        this.cometsGroup = null;
-        this.guestsGroup = null;
-        this.snrGroup = null;
-        this.constellationGroup = null;
-        this.mansionGroup = null;
-        this.pmArrowGroup = null;
-        this.selectRingGroup = null;
-        this.globeGroup = null;
-
-        // 模式: 'sphere' | 'plane' | 'compare'
-        this.viewMode = 'sphere';
-
-        // 当前数据
         this.stars = [];
+        this.starPoints = null;
         this.comets = [];
         this.guests = [];
         this.snr = [];
-        this.dynasties = [];
         this.mansions = [];
+        this.dynasties = [];
 
-        // 当前选中
-        this.selectedStar = null;
-        this.selectedGuest = null;
-        this.currentDynastyId = null;
-        this.compareDynastyId = null;
-        this.compareMode = false;
+        this.starColors = null;
+        this.starSizes = null;
+        this.starVelocities = null; // 自行向量 (世界坐标)
 
-        // 显示选项
-        this.displayFilter = 'all';
-        this.magThreshold = 6.5;
-        this.styleMode = 'ancient';
+        this.rotationX = 0.3;
+        this.rotationZ = 0;
+        this.camDist = 2.8;
 
-        // 射线拾取
+        this.viewMode = 'sphere';   // sphere | flat | compare
+        this.displayFilter = 'all'; // all | stars | comets | guests | snr
+        this.styleMode = 'planck';  // planck | ancient | modern
+        this.magThreshold = 7.0;
+
+        this.isDragging = false;
+        this.lastX = 0;
+        this.lastY = 0;
+
         this.raycaster = new THREE.Raycaster();
         this.mouse = new THREE.Vector2();
-        this.pointCloud = null;  // 用于高效拾取的点云
-        this.starDataMap = [];  // point 索引 -> star 对象
+        this.hoveredStar = null;
+        this.selectedStar = null;
+
+        this.SPHERE_RADIUS = 100;
 
         this._init();
-        this._animate();
     }
 
     _init() {
-        const w = window.innerWidth;
-        const h = window.innerHeight;
+        this.scene = new THREE.Scene();
+        this.scene.background = null;
 
-        // 渲染器
+        const w = this.canvas.clientWidth || window.innerWidth;
+        const h = this.canvas.clientHeight || (window.innerHeight - 162);
+
+        this.camera = new THREE.PerspectiveCamera(60, w / h, 0.1, 2000);
+        this.camera.position.set(0, 0, this.camDist * this.SPHERE_RADIUS * 0.03);
+        this.camera.lookAt(0, 0, 0);
+
         this.renderer = new THREE.WebGLRenderer({
             canvas: this.canvas,
             antialias: true,
             alpha: true,
         });
-        this.renderer.setPixelRatio(window.devicePixelRatio || 1);
-        this.renderer.setSize(w, h);
-        this.renderer.setClearColor(0x000000, 0);
+        this.renderer.setPixelRatio(window.devicePixelRatio);
+        this.renderer.setSize(w, h, false);
 
-        // 场景
-        this.scene = new THREE.Scene();
+        // 天球背景
+        this._addSkySphere();
 
-        // 相机
-        this.camera = new THREE.PerspectiveCamera(45, w / h, 0.1, 1000);
-        this.camera.position.set(0, 0, 3.5);
+        // 天球赤道与黄道
+        this._addReferenceGrids();
 
-        // 控制器
-        this.controls = new THREE.OrbitControls(this.camera, this.canvas);
-        this.controls.enableDamping = true;
-        this.controls.dampingFactor = 0.05;
-        this.controls.minDistance = 1.2;
-        this.controls.maxDistance = 20;
-        this.controls.enablePan = false;
+        // 事件
+        this._bindEvents();
 
-        // 组
-        this.starsGroup = new THREE.Group();
-        this.cometsGroup = new THREE.Group();
-        this.guestsGroup = new THREE.Group();
-        this.snrGroup = new THREE.Group();
-        this.mansionGroup = new THREE.Group();
-        this.pmArrowGroup = new THREE.Group();
-        this.selectRingGroup = new THREE.Group();
-        this.globeGroup = new THREE.Group();
-
-        this.scene.add(this.starsGroup);
-        this.scene.add(this.cometsGroup);
-        this.scene.add(this.guestsGroup);
-        this.scene.add(this.snrGroup);
-        this.scene.add(this.mansionGroup);
-        this.scene.add(this.pmArrowGroup);
-        this.scene.add(this.selectRingGroup);
-        this.scene.add(this.globeGroup);
-
-        // 天球背景网格
-        this._createGlobe();
-
-        // 事件监听
-        window.addEventListener('resize', () => this._onResize());
-        this.canvas.addEventListener('click', (e) => this._onClick(e));
-        this.canvas.addEventListener('mousemove', (e) => this._onMouseMove(e));
-
-        // 环境光 (微弱)
-        const ambient = new THREE.AmbientLight(0x222233, 0.5);
-        this.scene.add(ambient);
+        // 启动渲染循环
+        this._animate();
     }
 
-    _createGlobe() {
-        // 天球参考线
-        const g = new THREE.Group();
-
-        // 赤道
-        const equatorGeom = new THREE.RingGeometry(0.998, 1.002, 128);
-        const equatorMat = new THREE.MeshBasicMaterial({
-            color: 0x406090, side: THREE.DoubleSide, transparent: true, opacity: 0.3
+    _addSkySphere() {
+        const geom = new THREE.SphereGeometry(this.SPHERE_RADIUS, 64, 64);
+        // 内表面
+        const mat = new THREE.ShaderMaterial({
+            side: THREE.BackSide,
+            transparent: true,
+            uniforms: {},
+            vertexShader: `
+                varying vec3 vPos;
+                void main() {
+                    vPos = position;
+                    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+                }
+            `,
+            fragmentShader: `
+                varying vec3 vPos;
+                void main() {
+                    float r = length(vPos.xy) / 100.0;
+                    vec3 col1 = vec3(0.02, 0.04, 0.10);
+                    vec3 col2 = vec3(0.005, 0.008, 0.03);
+                    vec3 c = mix(col2, col1, smoothstep(0.0, 1.0, r));
+                    // 银道面微弱光带
+                    float gal = smoothstep(0.0, 0.3, 0.3 - abs(vPos.z / 100.0)) * 0.1;
+                    c += vec3(0.15, 0.18, 0.25) * gal;
+                    gl_FragColor = vec4(c, 1.0);
+                }
+            `,
         });
-        const equator = new THREE.Mesh(equatorGeom, equatorMat);
-        equator.rotation.x = Math.PI / 2;
-        g.add(equator);
+        this.scene.add(new THREE.Mesh(geom, mat));
+    }
 
-        // 黄道
-        const eclipticGeom = new THREE.RingGeometry(0.997, 1.003, 128);
-        const eclipticMat = new THREE.MeshBasicMaterial({
-            color: 0xffaa33, side: THREE.DoubleSide, transparent: true, opacity: 0.3
+    _addReferenceGrids() {
+        const grp = new THREE.Group();
+
+        // 天球赤道 (Dec=0)
+        const eqPts = [];
+        for (let ra = 0; ra <= 360; ra += 3) {
+            const [x, y, z] = Astro.equatorialToCartesian(ra, 0, this.SPHERE_RADIUS * 0.995);
+            eqPts.push(new THREE.Vector3(x, y, z));
+        }
+        const eqGeom = new THREE.BufferGeometry().setFromPoints(eqPts);
+        grp.add(new THREE.Line(eqGeom, new THREE.LineBasicMaterial({
+            color: 0x4060a0, transparent: true, opacity: 0.35
+        })));
+
+        // 黄道 (倾斜 23.44°)
+        const ecPts = [];
+        for (let lon = 0; lon <= 360; lon += 3) {
+            const eps = 23.44 * Astro.DEG2RAD;
+            const lam = lon * Astro.DEG2RAD;
+            const beta = 0;
+            const ra = Math.atan2(
+                Math.sin(lam) * Math.cos(eps) - Math.tan(beta) * Math.sin(eps),
+                Math.cos(lam)
+            ) * Astro.RAD2DEG;
+            const dec = Math.asin(
+                Math.sin(beta) * Math.cos(eps) + Math.cos(beta) * Math.sin(eps) * Math.sin(lam)
+            ) * Astro.RAD2DEG;
+            const [x, y, z] = Astro.equatorialToCartesian(Astro.normalize360(ra), dec, this.SPHERE_RADIUS * 0.995);
+            ecPts.push(new THREE.Vector3(x, y, z));
+        }
+        const ecGeom = new THREE.BufferGeometry().setFromPoints(ecPts);
+        grp.add(new THREE.Line(ecGeom, new THREE.LineBasicMaterial({
+            color: 0xffaa40, transparent: true, opacity: 0.35
+        })));
+
+        this.scene.add(grp);
+    }
+
+    _bindEvents() {
+        const c = this.canvas;
+
+        c.addEventListener('mousedown', e => {
+            this.isDragging = true;
+            this.lastX = e.clientX;
+            this.lastY = e.clientY;
         });
-        const ecliptic = new THREE.Mesh(eclipticGeom, eclipticMat);
-        ecliptic.rotation.x = Math.PI / 2;
-        ecliptic.rotation.z = (23.5 * Math.PI / 180);
-        g.add(ecliptic);
+        window.addEventListener('mouseup', () => { this.isDragging = false; });
 
-        // 天球透明壳
-        const sphereGeom = new THREE.SphereGeometry(0.98, 64, 32);
-        const sphereMat = new THREE.MeshBasicMaterial({
-            color: 0x000010, side: THREE.BackSide, transparent: true, opacity: 0.3
+        window.addEventListener('mousemove', e => {
+            if (this.isDragging) {
+                const dx = e.clientX - this.lastX;
+                const dy = e.clientY - this.lastY;
+                this.rotationZ += dx * 0.005;
+                this.rotationX += dy * 0.005;
+                this.rotationX = Math.max(-Math.PI / 2 + 0.1, Math.min(Math.PI / 2 - 0.1, this.rotationX));
+                this.lastX = e.clientX;
+                this.lastY = e.clientY;
+            } else {
+                this._handleHover(e);
+            }
         });
-        const sphere = new THREE.Mesh(sphereGeom, sphereMat);
-        g.add(sphere);
 
-        this.globeGroup.add(g);
+        c.addEventListener('wheel', e => {
+            e.preventDefault();
+            const s = e.deltaY > 0 ? 1.15 : 0.87;
+            this.zoom(s);
+        }, { passive: false });
+
+        c.addEventListener('click', e => {
+            if (this.isDragging) return;
+            this._handleClick(e);
+        });
+
+        window.addEventListener('resize', () => this._onResize());
+        this._onResize();
     }
 
     _onResize() {
-        const w = window.innerWidth;
-        const h = window.innerHeight;
+        const w = this.canvas.clientWidth || window.innerWidth;
+        const h = this.canvas.clientHeight || (window.innerHeight - 162);
         this.camera.aspect = w / h;
         this.camera.updateProjectionMatrix();
-        this.renderer.setSize(w, h);
+        this.renderer.setSize(w, h, false);
+        if (this.labelsCanvas) {
+            this.labelsCanvas.width = w;
+            this.labelsCanvas.height = h;
+        }
     }
 
-    _onClick(e) {
-        const rect = this.canvas.getBoundingClientRect();
-        this.mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
-        this.mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
-
-        this.raycaster.setFromCamera(this.mouse, this.camera);
-
-        // 先检测客星 (优先)
-        if (this.guestsGroup.visible) {
-            const guestHits = this.raycaster.intersectObjects(this.guestsGroup.children, true);
-            if (guestHits.length > 0) {
-                const obj = guestHits[0].object;
-                if (obj.userData && obj.userData.guest) {
-                    this._selectGuest(obj.userData.guest);
-                    return;
-                }
-            }
-        }
-
-        // 检测恒星点云
-        if (this.pointCloud && this.starsGroup.visible) {
-            const hits = this.raycaster.intersectObject(this.pointCloud);
-            if (hits.length > 0) {
-                const idx = hits[0].index;
-                if (idx >= 0 && idx < this.starDataMap.length) {
-                    const star = this.starDataMap[idx];
-                    this._selectStar(star);
-                    return;
-                }
-            }
-        }
-
-        // 彗星
-        if (this.cometsGroup.visible) {
-            const cometHits = this.raycaster.intersectObjects(this.cometsGroup.children, true);
-            if (cometHits.length > 0) {
-                const obj = cometHits[0].object;
-                if (obj.userData && obj.userData.comet) {
-                    // 彗星也可以点击
-                    return;
-                }
-            }
-        }
-
-        // 点击空白，取消选中
-        this._deselectStar();
-        this._deselectGuest();
+    zoom(factor) {
+        this.camDist = Math.max(1.3, Math.min(8.0, this.camDist * factor));
+        this.camera.position.setLength(this.camDist * this.SPHERE_RADIUS * 0.03);
     }
 
-    _onMouseMove(e) {
-        const rect = this.canvas.getBoundingClientRect();
-        this.mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
-        this.mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+    resetView() {
+        this.rotationX = 0.3;
+        this.rotationZ = 0;
+        this.camDist = 2.8;
+        this.camera.position.set(0, 0, this.camDist * this.SPHERE_RADIUS * 0.03);
+    }
 
-        // tooltip
-        const tooltip = document.getElementById('tooltip');
-        if (!tooltip) return;
+    flyTo(ra, dec, dist = 2.2) {
+        // 简化: 把目标点旋转到视图中心
+        const targetZ = -ra * Astro.DEG2RAD;
+        const targetX = dec * Astro.DEG2RAD;
+        // 简单线性插值 (可改为缓动)
+        this.rotationZ = targetZ;
+        this.rotationX = targetX;
+        this.camDist = dist;
+        this.camera.position.set(0, 0, this.camDist * this.SPHERE_RADIUS * 0.03);
+    }
 
-        this.raycaster.setFromCamera(this.mouse, this.camera);
+    setViewMode(m) { this.viewMode = m; this._rebuildStars(); }
+    setDisplayFilter(f) { this.displayFilter = f; this._rebuildStars(); this._refreshVisibility(); }
+    setStyleMode(s) { this.styleMode = s; this._rebuildStars(); }
+    setMagThreshold(v) { this.magThreshold = v; this._rebuildStars(); }
 
-        let hovered = null;
-        let type = null;
+    setStars(stars) { this.stars = Array.isArray(stars) ? stars : []; this._rebuildStars(); }
+    setDynasties(d) { this.dynasties = d; }
+    setMansions(m) { this.mansions = m; this._rebuildMansionBoundaries(); }
+    setComets(c) { this.comets = c || []; this._rebuildComets(); }
+    setGuestStars(g) { this.guests = g || []; this._rebuildGuests(); }
+    setSnr(s) { this.snr = s || []; this._rebuildSnr(); }
 
-        if (this.pointCloud) {
-            const hits = this.raycaster.intersectObject(this.pointCloud);
-            if (hits.length > 0) {
-                const idx = hits[0].index;
-                if (idx >= 0 && idx < this.starDataMap.length) {
-                    hovered = this.starDataMap[idx];
-                    type = 'star';
-                }
-            }
-        }
-
-        if (!hovered && this.guestsGroup.visible) {
-            const hits = this.raycaster.intersectObjects(this.guestsGroup.children, true);
-            if (hits.length > 0 && hits[0].object.userData.guest) {
-                hovered = hits[0].object.userData.guest;
-                type = 'guest';
-            }
-        }
-
-        if (hovered) {
-            tooltip.style.display = 'block';
-            tooltip.style.left = (e.clientX + 12) + 'px';
-            tooltip.style.top = (e.clientY + 12) + 'px';
-            if (type === 'star') {
-                tooltip.innerHTML = `
-                    <div class="name">${hovered.star_name_cn}</div>
-                    <div>星等: ${hovered.magnitude_num?.toFixed?.(2) || '-'}</div>
-                    <div>颜色: ${hovered.color_desc || '-'}</div>
-                    <div>朝代: ${hovered.dynasty_name || '-'}</div>
-                    <div>来源: ${hovered.source_book || '-'}</div>
-                `;
-            } else if (type === 'guest') {
-                tooltip.innerHTML = `
-                    <div class="name" style="color:#ffb74d;">${hovered.guest_name || '客星'}</div>
-                    <div>朝代: ${hovered.dynasty_name || '-'}</div>
-                    <div>峰值星等: ${hovered.peak_mag?.toFixed?.(1) || '-'}</div>
-                    <div>可见: ${hovered.visibility_days || '-'} 天</div>
-                `;
-            }
-            this.canvas.style.cursor = 'pointer';
-        } else {
-            tooltip.style.display = 'none';
-            this.canvas.style.cursor = 'grab';
-        }
+    _deselectStar() {
+        this.selectedStar = null;
+        this._hideTooltip();
     }
 
     // ============================================================
-    // 数据加载
+    // 恒星: Shader-based 点云 (高效渲染 1200+ 星点)
     // ============================================================
 
-    setDynasties(dynasties) {
-        this.dynasties = dynasties;
-    }
-
-    setMansions(mansions) {
-        this.mansions = mansions;
-        this._renderMansions();
-    }
-
-    setStars(stars) {
-        this.stars = stars;
-        this._renderStars();
-    }
-
-    setComets(comets) {
-        this.comets = comets;
-        this._renderComets();
-    }
-
-    setGuestStars(guests) {
-        this.guests = guests;
-        this._renderGuests();
-    }
-
-    setSnr(snr) {
-        this.snr = snr;
-        this._renderSnr();
-    }
-
-    // ============================================================
-    // 渲染恒星 (使用 Points + BufferGeometry 高效渲染)
-    // ============================================================
-
-    _renderStars() {
-        this._clearGroup(this.starsGroup);
-        this.starDataMap = [];
-
-        const positions = [];
-        const colors = [];
-        const sizes = [];
+    _rebuildStars() {
+        if (this.starPoints) {
+            this.scene.remove(this.starPoints);
+            this.starPoints.geometry.dispose();
+            this.starPoints.material.dispose();
+            this.starPoints = null;
+        }
 
         const filtered = this.stars.filter(s => {
-            if (this.magThreshold !== null && s.magnitude_num > this.magThreshold) return false;
-            return true;
+            const m = s.magnitude_num != null ? s.magnitude_num : 6;
+            if (m > this.magThreshold) return false;
+            if (this.displayFilter !== 'all' && this.displayFilter !== 'stars') return false;
+            return s.ra_j2000 != null || s.ra_ancient_conv != null;
         });
 
-        const radius = 1.0;
+        if (filtered.length === 0) return;
 
-        filtered.forEach((star, i) => {
-            const ra = star.ra_j2000 ?? star.ra_ancient_conv ?? 0;
-            const dec = star.dec_j2000 ?? star.dec_ancient_conv ?? 0;
-            if (ra == null || dec == null) return;
+        const positions = new Float32Array(filtered.length * 3);
+        const colors = new Float32Array(filtered.length * 3);
+        const sizes = new Float32Array(filtered.length);
+        const velocities = new Float32Array(filtered.length * 3); // 自行 (度/1000yr)
 
-            const pos = Astro.sphereToCartesian(ra, dec, radius);
-            positions.push(pos.x, pos.y, pos.z);
+        filtered.forEach((s, i) => {
+            const ra = (s.ra_j2000 != null ? s.ra_j2000 : s.ra_ancient_conv) || 0;
+            const dec = (s.dec_j2000 != null ? s.dec_j2000 : s.dec_ancient_conv) || 0;
+            const [x, y, z] = Astro.equatorialToCartesian(ra, dec, this.SPHERE_RADIUS * 0.98);
+            positions[i*3] = x; positions[i*3+1] = y; positions[i*3+2] = z;
 
-            const mag = star.magnitude_num ?? 5;
-            const colorStr = Astro.getStarColor(star.color_desc || 'default', mag);
-            const color = new THREE.Color(colorStr);
-            colors.push(color.r, color.g, color.b);
+            // ★ 修复 3: 使用 Planck 黑体色温映射
+            const col = Astro.starToColor(s, this.styleMode);
+            colors[i*3] = col.r / 255;
+            colors[i*3+1] = col.g / 255;
+            colors[i*3+2] = col.b / 255;
 
-            const size = Astro.magToSize(mag) * 0.8;
-            sizes.push(size);
+            // 大小按星等: m0=8px, 每等 × 0.63
+            const mag = s.magnitude_num != null ? s.magnitude_num : 6;
+            sizes[i] = 8.0 * Math.pow(0.63, mag);
 
-            this.starDataMap.push(star);
+            // 自行向量 (方向)
+            const pmRa = s.proper_motion_ra || 0;
+            const pmDec = s.proper_motion_dec || 0;
+            const cosDec = Math.cos(dec * Astro.DEG2RAD) || 1;
+            // 1000 年尺度位移 (度)
+            const draDeg = pmRa * 1000 / (3600 * 1000) / cosDec;
+            const ddecDeg = pmDec * 1000 / (3600 * 1000);
+            const ra2 = Astro.normalize360(ra + draDeg);
+            const dec2 = Math.max(-89, Math.min(89, dec + ddecDeg));
+            const [x2, y2, z2] = Astro.equatorialToCartesian(ra2, dec2, this.SPHERE_RADIUS * 0.98);
+            velocities[i*3] = x2 - x;
+            velocities[i*3+1] = y2 - y;
+            velocities[i*3+2] = z2 - z;
         });
 
-        // 点云几何体
         const geom = new THREE.BufferGeometry();
-        geom.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
-        geom.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
-        geom.setAttribute('size', new THREE.Float32BufferAttribute(sizes, 1));
+        geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        geom.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+        geom.setAttribute('size', new THREE.BufferAttribute(sizes, 1));
 
-        // 自定义 ShaderMaterial
+        // 自定义 Shader: 圆形高斯星点 + additive blending
         const mat = new THREE.ShaderMaterial({
             uniforms: {
-                pixelRatio: { value: window.devicePixelRatio || 1 },
-                scale: { value: 300.0 },
+                uPixelRatio: { value: window.devicePixelRatio },
             },
             vertexShader: `
-                attribute float size;
                 attribute vec3 color;
+                attribute float size;
                 varying vec3 vColor;
-                uniform float scale;
-                uniform float pixelRatio;
+                uniform float uPixelRatio;
                 void main() {
                     vColor = color;
-                    vec4 mvPos = modelViewMatrix * vec4(position, 1.0);
-                    gl_Position = projectionMatrix * mvPos;
-                    gl_PointSize = size * scale * pixelRatio / -mvPos.z;
+                    vec4 mv = modelViewMatrix * vec4(position, 1.0);
+                    gl_PointSize = size * uPixelRatio * (1.0 / -mv.z) * 300.0;
+                    gl_Position = projectionMatrix * mv;
                 }
             `,
             fragmentShader: `
                 varying vec3 vColor;
                 void main() {
-                    vec2 uv = gl_PointCoord - vec2(0.5);
-                    float dist = length(uv);
-                    if (dist > 0.5) discard;
-                    float alpha = smoothstep(0.5, 0.0, dist);
-                    alpha = pow(alpha, 1.5);
-                    vec3 col = vColor;
-                    // 中心更亮
-                    col += vec3(pow(1.0 - dist * 2.0, 2.0) * 0.5);
-                    gl_FragColor = vec4(col, alpha);
+                    vec2 uv = gl_PointCoord - 0.5;
+                    float d = length(uv);
+                    if (d > 0.5) discard;
+                    // 高斯衰减
+                    float alpha = exp(-d * d * 14.0);
+                    // 核心稍亮
+                    vec3 c = vColor * (1.0 + smoothstep(0.0, 0.2, 0.2 - d) * 0.8);
+                    gl_FragColor = vec4(c, alpha);
                 }
             `,
             transparent: true,
@@ -383,405 +337,324 @@ class StarField {
             blending: THREE.AdditiveBlending,
         });
 
-        this.pointCloud = new THREE.Points(geom, mat);
-        this.starsGroup.add(this.pointCloud);
-
-        // 更新数量统计
-        const infoEl = document.getElementById('star-count-info');
-        if (infoEl) {
-            infoEl.textContent = `${filtered.length} 颗星`;
-        }
+        this.starPoints = new THREE.Points(geom, mat);
+        this.starPoints.userData.filtered = filtered;
+        this.scene.add(this.starPoints);
     }
 
     // ============================================================
-    // 渲染彗星 (菱形符号)
+    // 星宿边界
     // ============================================================
 
-    _renderComets() {
-        this._clearGroup(this.cometsGroup);
-        const radius = 1.005;
-
-        this.comets.forEach(comet => {
-            const ra = comet.ra_apparent;
-            const dec = comet.dec_apparent;
-            if (ra == null || dec == null) return;
-
-            const pos = Astro.sphereToCartesian(ra, dec, radius);
-
-            // 彗星用旋转的菱形 + 拖尾
-            const group = new THREE.Group();
-
-            const coreGeom = new THREE.OctahedronGeometry(0.012, 0);
-            const coreMat = new THREE.MeshBasicMaterial({ color: 0x00e5ff });
-            const core = new THREE.Mesh(coreGeom, coreMat);
-            group.add(core);
-
-            // 光晕
-            const glowGeom = new THREE.SphereGeometry(0.025, 16, 16);
-            const glowMat = new THREE.MeshBasicMaterial({
-                color: 0x00e5ff, transparent: true, opacity: 0.3
-            });
-            const glow = new THREE.Mesh(glowGeom, glowMat);
-            group.add(glow);
-
-            group.position.set(pos.x, pos.y, pos.z);
-            group.lookAt(0, 0, 0);
-            group.userData = { comet };
-
-            this.cometsGroup.add(group);
-        });
-    }
-
-    // ============================================================
-    // 渲染客星 (脉动的红点 + 十字星芒)
-    // ============================================================
-
-    _renderGuests() {
-        this._clearGroup(this.guestsGroup);
-        const radius = 1.01;
-
-        this.guests.forEach(guest => {
-            const ra = guest.ra_est;
-            const dec = guest.dec_est;
-            if (ra == null || dec == null) return;
-
-            const pos = Astro.sphereToCartesian(ra, dec, radius);
-            const group = new THREE.Group();
-
-            // 核心点
-            const coreGeom = new THREE.SphereGeometry(0.018, 16, 16);
-            const coreMat = new THREE.MeshBasicMaterial({ color: 0xff5722 });
-            const core = new THREE.Mesh(coreGeom, coreMat);
-            group.add(core);
-
-            // 十字星芒
-            const crossGroup = new THREE.Group();
-            const lineMat = new THREE.LineBasicMaterial({
-                color: 0xffb74d, transparent: true, opacity: 0.8
-            });
-            for (let i = 0; i < 4; i++) {
-                const pts = [
-                    new THREE.Vector3(0, 0, 0),
-                    new THREE.Vector3(
-                        Math.cos(i * Math.PI / 2) * 0.035,
-                        Math.sin(i * Math.PI / 2) * 0.035,
-                        0
-                    )
-                ];
-                const geom = new THREE.BufferGeometry().setFromPoints(pts);
-                const line = new THREE.Line(geom, lineMat);
-                crossGroup.add(line);
+    _rebuildMansionBoundaries() {
+        // 清除旧边界
+        this.scene.children.forEach(obj => {
+            if (obj.userData && obj.userData.isMansion) {
+                this.scene.remove(obj);
             }
-            group.add(crossGroup);
-
-            // 外光晕
-            const glowGeom = new THREE.SphereGeometry(0.04, 16, 16);
-            const glowMat = new THREE.MeshBasicMaterial({
-                color: 0xff5722, transparent: true, opacity: 0.2
-            });
-            const glow = new THREE.Mesh(glowGeom, glowMat);
-            group.add(glow);
-
-            group.position.set(pos.x, pos.y, pos.z);
-            group.lookAt(0, 0, 0);
-            group.userData = { guest, pulseTime: Math.random() * Math.PI * 2 };
-
-            this.guestsGroup.add(group);
         });
-    }
+        if (!this.mansions || this.mansions.length === 0) return;
 
-    // ============================================================
-    // 渲染超新星遗迹 (空心圆)
-    // ============================================================
+        const grp = new THREE.Group();
+        grp.userData.isMansion = true;
 
-    _renderSnr() {
-        this._clearGroup(this.snrGroup);
-        const radius = 0.995;
-
-        this.snr.forEach(s => {
-            const pos = Astro.sphereToCartesian(s.ra_deg, s.dec_deg, radius);
-            const ringGeom = new THREE.RingGeometry(0.015, 0.02, 24);
-            const ringMat = new THREE.MeshBasicMaterial({
-                color: 0x9575cd, side: THREE.DoubleSide, transparent: true, opacity: 0.8
-            });
-            const ring = new THREE.Mesh(ringGeom, ringMat);
-            ring.position.set(pos.x, pos.y, pos.z);
-            ring.lookAt(0, 0, 0);
-            ring.userData = { snr: s };
-            this.snrGroup.add(ring);
-        });
-    }
-
-    // ============================================================
-    // 渲染二十八宿边界
-    // ============================================================
-
-    _renderMansions() {
-        this._clearGroup(this.mansionGroup);
-        const radius = 0.99;
-        const lineMat = new THREE.LineBasicMaterial({
-            color: 0x4466aa, transparent: true, opacity: 0.4
-        });
-
-        this.mansions.forEach((m, i) => {
-            const nextM = this.mansions[(i + 1) % this.mansions.length];
-            const ra1 = m.standard_ra_deg;
-            const ra2 = nextM.standard_ra_deg;
-
-            // 赤经圈 (从 -80° 到 +80° 赤纬的弧线)
-            const points = [];
-            for (let dec = -80; dec <= 80; dec += 5) {
-                const p = Astro.sphereToCartesian(ra1, dec, radius);
-                points.push(new THREE.Vector3(p.x, p.y, p.z));
-            }
-            const geom = new THREE.BufferGeometry().setFromPoints(points);
-            const line = new THREE.Line(geom, lineMat);
-            line.userData = { mansion: m };
-            this.mansionGroup.add(line);
-        });
-
-        // 宿名标签 (简化为点标记)
         this.mansions.forEach(m => {
-            const pos = Astro.sphereToCartesian(m.standard_ra_deg + 5, 0, radius * 0.97);
-            const dotGeom = new THREE.SphereGeometry(0.005, 8, 8);
-            const dotMat = new THREE.MeshBasicMaterial({ color: 0x6699cc });
-            const dot = new THREE.Mesh(dotGeom, dotMat);
-            dot.position.set(pos.x, pos.y, pos.z);
-            dot.userData = { mansion: m };
-            this.mansionGroup.add(dot);
+            const pts = [];
+            // 赤经圈 (从 Dec=+80 到 Dec=-80)
+            for (let dec = 80; dec >= -80; dec -= 4) {
+                const [x, y, z] = Astro.equatorialToCartesian(m.ra_start_deg, dec, this.SPHERE_RADIUS * 0.99);
+                pts.push(new THREE.Vector3(x, y, z));
+            }
+            const g = new THREE.BufferGeometry().setFromPoints(pts);
+            grp.add(new THREE.Line(g, new THREE.LineBasicMaterial({
+                color: 0x5070b0,
+                transparent: true,
+                opacity: 0.2,
+            })));
         });
+        this.scene.add(grp);
     }
 
     // ============================================================
-    // 选中效果
+    // 彗星: 菱形 + 蓝色
     // ============================================================
 
-    _selectStar(star) {
-        this.selectedStar = star;
-        this._renderSelectRing();
-        this._renderProperMotionArrow(star);
-
-        // 触发全局事件
-        if (window.onStarSelected) {
-            window.onStarSelected(star);
-        }
-    }
-
-    _deselectStar() {
-        this.selectedStar = null;
-        this._clearGroup(this.selectRingGroup);
-        this._clearGroup(this.pmArrowGroup);
-    }
-
-    _selectGuest(guest) {
-        this.selectedGuest = guest;
-        if (window.onGuestSelected) {
-            window.onGuestSelected(guest);
-        }
-    }
-
-    _deselectGuest() {
-        this.selectedGuest = null;
-    }
-
-    _renderSelectRing() {
-        this._clearGroup(this.selectRingGroup);
-        if (!this.selectedStar) return;
-
-        const ra = this.selectedStar.ra_j2000 ?? this.selectedStar.ra_ancient_conv;
-        const dec = this.selectedStar.dec_j2000 ?? this.selectedStar.dec_ancient_conv;
-        const pos = Astro.sphereToCartesian(ra, dec, 1.02);
-
-        const ringGeom = new THREE.RingGeometry(0.025, 0.032, 32);
-        const ringMat = new THREE.MeshBasicMaterial({
-            color: 0x66ccff, side: THREE.DoubleSide, transparent: true, opacity: 0.9
+    _rebuildComets() {
+        this.scene.children.forEach(o => {
+            if (o.userData?.isComet) this.scene.remove(o);
         });
-        const ring = new THREE.Mesh(ringGeom, ringMat);
-        ring.position.set(pos.x, pos.y, pos.z);
-        ring.lookAt(0, 0, 0);
-        this.selectRingGroup.add(ring);
+        if (this.displayFilter !== 'all' && this.displayFilter !== 'comets') return;
 
-        // 外扩波纹
-        const waveGeom = new THREE.RingGeometry(0.03, 0.035, 32);
-        const waveMat = new THREE.MeshBasicMaterial({
-            color: 0x66ccff, side: THREE.DoubleSide, transparent: true, opacity: 0.5
+        const grp = new THREE.Group();
+        grp.userData.isComet = true;
+        this.comets.forEach(c => {
+            if (c.ra_deg == null) return;
+            const [x, y, z] = Astro.equatorialToCartesian(c.ra_deg, c.dec_deg, this.SPHERE_RADIUS * 0.97);
+            const size = 1.2 + Math.pow(0.6, c.magnitude ?? 4) * 1.5;
+
+            // 菱形 Sprite
+            const canvas = document.createElement('canvas');
+            canvas.width = 64; canvas.height = 64;
+            const ctx = canvas.getContext('2d');
+            const g = ctx.createRadialGradient(32, 32, 0, 32, 32, 30);
+            g.addColorStop(0, 'rgba(112,192,255,1)');
+            g.addColorStop(0.3, 'rgba(112,192,255,0.7)');
+            g.addColorStop(1, 'rgba(112,192,255,0)');
+            ctx.fillStyle = g;
+            ctx.beginPath();
+            ctx.moveTo(32, 6); ctx.lineTo(56, 32); ctx.lineTo(32, 58); ctx.lineTo(8, 32);
+            ctx.closePath();
+            ctx.fill();
+
+            const tex = new THREE.CanvasTexture(canvas);
+            const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false });
+            const sp = new THREE.Sprite(mat);
+            sp.position.set(x, y, z);
+            sp.scale.set(size * 4, size * 4, 1);
+            sp.userData = { type: 'comet', data: c };
+            grp.add(sp);
         });
-        const wave = new THREE.Mesh(waveGeom, waveMat);
-        wave.position.set(pos.x, pos.y, pos.z);
-        wave.lookAt(0, 0, 0);
-        wave.userData = { isWave: true, t: 0 };
-        this.selectRingGroup.add(wave);
+        this.scene.add(grp);
     }
 
-    _renderProperMotionArrow(star) {
-        this._clearGroup(this.pmArrowGroup);
-        const pmRa = star.proper_motion_ra;
-        const pmDec = star.proper_motion_dec;
-        if (pmRa == null || pmDec == null) return;
-        if (Math.abs(pmRa) < 1 && Math.abs(pmDec) < 1) return; // 太小不显示
+    // ============================================================
+    // 客星 (超新星): 脉动红色 + 十字星芒
+    // ============================================================
 
-        const ra0 = star.ra_j2000 ?? star.ra_ancient_conv;
-        const dec0 = star.dec_j2000 ?? star.dec_ancient_conv;
-
-        // 放大 500 年的位移，便于可视化
-        const years = 500;
-        const cosDec = Math.cos(dec0 * Astro.DEG2RAD) || 1e-9;
-        const dRa = (pmRa / 3600000) * years / cosDec;
-        const dDec = (pmDec / 3600000) * years;
-
-        const ra1 = Astro.norm360(ra0 + dRa);
-        const dec1 = Astro.clamp(dec0 + dDec, -89, 89);
-
-        const start = Astro.sphereToCartesian(ra0, dec0, 1.03);
-        const end   = Astro.sphereToCartesian(ra1, dec1, 1.03);
-
-        // 画弧线 (用多点近似)
-        const points = [];
-        const n = 20;
-        for (let i = 0; i <= n; i++) {
-            const t = i / n;
-            const ra = ra0 + (ra1 - ra0) * t;
-            const dec = dec0 + (dec1 - dec0) * t;
-            const p = Astro.sphereToCartesian(ra, dec, 1.03);
-            points.push(new THREE.Vector3(p.x, p.y, p.z));
-        }
-        const lineGeom = new THREE.BufferGeometry().setFromPoints(points);
-        const lineMat = new THREE.LineBasicMaterial({
-            color: 0xffcc00, transparent: true, opacity: 0.9
+    _rebuildGuests() {
+        this.scene.children.forEach(o => {
+            if (o.userData?.isGuest) this.scene.remove(o);
         });
-        const line = new THREE.Line(lineGeom, lineMat);
-        this.pmArrowGroup.add(line);
+        if (this.displayFilter !== 'all' && this.displayFilter !== 'guests') return;
 
-        // 箭头 (用锥体)
-        const coneGeom = new THREE.ConeGeometry(0.012, 0.03, 8);
-        const coneMat = new THREE.MeshBasicMaterial({ color: 0xffcc00 });
-        const cone = new THREE.Mesh(coneGeom, coneMat);
-        cone.position.set(end.x, end.y, end.z);
-        cone.lookAt(start.x, start.y, start.z);
-        cone.rotateX(-Math.PI / 2);
-        this.pmArrowGroup.add(cone);
+        const grp = new THREE.Group();
+        grp.userData.isGuest = true;
+        this.guests.forEach(g => {
+            if (g.ra_deg == null) return;
+            const [x, y, z] = Astro.equatorialToCartesian(g.ra_deg, g.dec_deg, this.SPHERE_RADIUS * 0.97);
+            const size = 2.5 + Math.pow(0.6, g.peak_mag ?? 2) * 3;
+
+            const canvas = document.createElement('canvas');
+            canvas.width = 128; canvas.height = 128;
+            const ctx = canvas.getContext('2d');
+            // 中心点
+            ctx.fillStyle = 'rgba(255,100,100,0.95)';
+            ctx.beginPath(); ctx.arc(64, 64, 8, 0, Math.PI * 2); ctx.fill();
+            // 十字星芒
+            ctx.strokeStyle = 'rgba(255,160,160,0.7)';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(4, 64); ctx.lineTo(124, 64);
+            ctx.moveTo(64, 4); ctx.lineTo(64, 124);
+            ctx.stroke();
+            // 外晕
+            const grad = ctx.createRadialGradient(64, 64, 5, 64, 64, 60);
+            grad.addColorStop(0, 'rgba(255,120,120,0.6)');
+            grad.addColorStop(1, 'rgba(255,120,120,0)');
+            ctx.fillStyle = grad;
+            ctx.beginPath(); ctx.arc(64, 64, 60, 0, Math.PI * 2); ctx.fill();
+
+            const tex = new THREE.CanvasTexture(canvas);
+            const mat = new THREE.SpriteMaterial({
+                map: tex, transparent: true, depthWrite: false,
+            });
+            const sp = new THREE.Sprite(mat);
+            sp.position.set(x, y, z);
+            sp.scale.set(size * 3, size * 3, 1);
+            sp.userData = { type: 'guest', data: g };
+            grp.add(sp);
+        });
+        this.scene.add(grp);
     }
 
     // ============================================================
-    // 对比模式: 同一颗星在两个朝代的位置都显示
+    // SNR: 紫色空心圆
     // ============================================================
 
-    setCompareMode(enabled, dynastyId1, dynastyId2) {
-        this.compareMode = enabled;
-        this.compareDynastyId = dynastyId2;
+    _rebuildSnr() {
+        this.scene.children.forEach(o => {
+            if (o.userData?.isSnr) this.scene.remove(o);
+        });
+        if (this.displayFilter !== 'all' && this.displayFilter !== 'snr') return;
+
+        const grp = new THREE.Group();
+        grp.userData.isSnr = true;
+        this.snr.forEach(s => {
+            const [x, y, z] = Astro.equatorialToCartesian(s.ra_deg, s.dec_deg, this.SPHERE_RADIUS * 0.965);
+            // 圆大小按直径
+            const dpc = s.diameter_pc ?? 10;
+            const size = 1.5 + Math.log10(dpc + 1) * 1.8;
+
+            const canvas = document.createElement('canvas');
+            canvas.width = 64; canvas.height = 64;
+            const ctx = canvas.getContext('2d');
+            ctx.strokeStyle = 'rgba(192,112,255,0.9)';
+            ctx.lineWidth = 2;
+            ctx.beginPath(); ctx.arc(32, 32, 24, 0, Math.PI * 2); ctx.stroke();
+            ctx.strokeStyle = 'rgba(192,112,255,0.4)';
+            ctx.lineWidth = 1;
+            ctx.beginPath(); ctx.arc(32, 32, 14, 0, Math.PI * 2); ctx.stroke();
+
+            const tex = new THREE.CanvasTexture(canvas);
+            const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false });
+            const sp = new THREE.Sprite(mat);
+            sp.position.set(x, y, z);
+            sp.scale.set(size * 2.5, size * 2.5, 1);
+            sp.userData = { type: 'snr', data: s };
+            grp.add(sp);
+        });
+        this.scene.add(grp);
+    }
+
+    _refreshVisibility() {
+        this._rebuildComets();
+        this._rebuildGuests();
+        this._rebuildSnr();
     }
 
     // ============================================================
-    // 显示控制
+    // 射线拾取 & 交互
     // ============================================================
 
-    setDisplayFilter(filter) {
-        this.displayFilter = filter;
-        const all = filter === 'all';
-        this.starsGroup.visible = all || filter === 'stars';
-        this.cometsGroup.visible = all || filter === 'comets';
-        this.guestsGroup.visible = all || filter === 'guests';
-        this.snrGroup.visible = all || filter === 'snr';
-        this.mansionGroup.visible = true;
-    }
+    _handleHover(e) {
+        const rect = this.canvas.getBoundingClientRect();
+        this.mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+        this.mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
 
-    setMagThreshold(val) {
-        this.magThreshold = val;
-        this._renderStars();
-    }
+        this.raycaster.setFromCamera(this.mouse, this.camera);
 
-    setStyleMode(mode) {
-        this.styleMode = mode;
-        // 切换风格主要改变星颜色和背景
-    }
-
-    setViewMode(mode) {
-        this.viewMode = mode;
-        if (mode === 'sphere') {
-            this.camera.position.set(0, 0, 3.5);
-            this.globeGroup.visible = true;
-        } else if (mode === 'plane') {
-            // 平面投影 - 俯视南天
-            this.camera.position.set(0, 3, 0);
-            this.globeGroup.visible = true;
-        } else if (mode === 'compare') {
-            this.camera.position.set(0, 0, 3.5);
-            this.globeGroup.visible = true;
+        // 先检查 sprite (彗星/客星/SNR)
+        const sprites = [];
+        this.scene.traverse(o => {
+            if (o.isSprite && o.userData?.type) sprites.push(o);
+        });
+        const spriteHit = this.raycaster.intersectObjects(sprites)[0];
+        if (spriteHit) {
+            const ud = spriteHit.object.userData;
+            this._showTooltip(e.clientX, e.clientY, ud.type, ud.data);
+            this.canvas.style.cursor = 'pointer';
+            return;
         }
-        this.controls.reset();
+
+        // 再检查恒星点云
+        if (this.starPoints) {
+            const hits = this.raycaster.intersectObject(this.starPoints);
+            if (hits.length > 0) {
+                const idx = hits[0].index;
+                const s = this.starPoints.userData.filtered[idx];
+                this.hoveredStar = s;
+                this._showTooltip(e.clientX, e.clientY, 'star', s);
+                this.canvas.style.cursor = 'pointer';
+                return;
+            }
+        }
+
+        this.hoveredStar = null;
+        this._hideTooltip();
+        this.canvas.style.cursor = 'grab';
     }
 
-    // ============================================================
-    // 工具
-    // ============================================================
+    _handleClick(e) {
+        const rect = this.canvas.getBoundingClientRect();
+        this.mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+        this.mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+        this.raycaster.setFromCamera(this.mouse, this.camera);
 
-    _clearGroup(group) {
-        while (group.children.length > 0) {
-            const obj = group.children[0];
-            group.remove(obj);
-            if (obj.geometry) obj.geometry.dispose?.();
-            if (obj.material) {
-                if (Array.isArray(obj.material)) {
-                    obj.material.forEach(m => m.dispose?.());
-                } else {
-                    obj.material.dispose?.();
+        // Sprite 优先
+        const sprites = [];
+        this.scene.traverse(o => {
+            if (o.isSprite && o.userData?.type) sprites.push(o);
+        });
+        const spriteHit = this.raycaster.intersectObjects(sprites)[0];
+        if (spriteHit) {
+            const ud = spriteHit.object.userData;
+            if (ud.type === 'guest' && window.onGuestSelected) {
+                window.onGuestSelected(ud.data);
+            }
+            return;
+        }
+
+        if (this.starPoints) {
+            const hits = this.raycaster.intersectObject(this.starPoints);
+            if (hits.length > 0) {
+                const idx = hits[0].index;
+                const s = this.starPoints.userData.filtered[idx];
+                this.selectedStar = s;
+                if (window.onStarSelected) {
+                    window.onStarSelected(s);
                 }
             }
         }
     }
 
-    // ============================================================
-    // 动画循环
-    // ============================================================
+    _showTooltip(x, y, type, data) {
+        const el = document.getElementById('star-tooltip');
+        if (!el) return;
+        el.style.display = 'block';
+        el.style.left = (x + 14) + 'px';
+        el.style.top = (y + 14) + 'px';
+
+        let html = '';
+        if (type === 'star') {
+            html = `
+                <div class="tt-title">${data.star_name_cn || '未命名星'}</div>
+                <div class="tt-row"><span>朝代:</span><b>${data.dynasty_name || '-'}</b></div>
+                <div class="tt-row"><span>RA:</span><b>${(data.ra_j2000 ?? data.ra_ancient_conv ?? 0).toFixed(2)}°</b></div>
+                <div class="tt-row"><span>Dec:</span><b>${(data.dec_j2000 ?? data.dec_ancient_conv ?? 0).toFixed(2)}°</b></div>
+                <div class="tt-row"><span>星等:</span><b>${data.magnitude_num != null ? data.magnitude_num.toFixed(1) : '-'}</b></div>
+                <div class="tt-row"><span>颜色:</span><b>${data.color_desc || '-'}</b></div>
+            `;
+        } else if (type === 'comet') {
+            html = `
+                <div class="tt-title" style="color:#70c0ff;">${data.comet_id_code}</div>
+                <div class="tt-row"><span>朝代:</span><b>${data.dynasty_name || '-'}</b></div>
+                <div class="tt-row"><span>年份:</span><b>${data.year_ce || '-'}</b></div>
+                <div class="tt-row"><span>星等:</span><b>${data.magnitude != null ? data.magnitude.toFixed(1) : '-'}</b></div>
+            `;
+        } else if (type === 'guest') {
+            html = `
+                <div class="tt-title" style="color:#ff8080;">${data.guest_id_code} · 客星</div>
+                <div class="tt-row"><span>朝代:</span><b>${data.dynasty_name || '-'}</b></div>
+                <div class="tt-row"><span>年份:</span><b>公元 ${Math.round(data.year_ce)}</b></div>
+                <div class="tt-row"><span>峰值星等:</span><b>${data.peak_mag?.toFixed(1)}</b></div>
+                <div class="tt-row"><span>可见期:</span><b>${data.visibility_days || '-'} 天</b></div>
+                <div style="margin-top:6px;font-size:10px;color:#ffa060;">点击查看匹配结果 →</div>
+            `;
+        } else if (type === 'snr') {
+            html = `
+                <div class="tt-title" style="color:#c070ff;">${data.remnant_name}</div>
+                <div class="tt-row"><span>类型:</span><b>${data.sn_type}</b></div>
+                <div class="tt-row"><span>年龄:</span><b>${Math.round(data.age_yr)} 年</b></div>
+                <div class="tt-row"><span>距离:</span><b>${data.distance_kpc?.toFixed(2)} kpc</b></div>
+            `;
+        }
+        el.innerHTML = html;
+    }
+
+    _hideTooltip() {
+        const el = document.getElementById('star-tooltip');
+        if (el) el.style.display = 'none';
+    }
 
     _animate() {
         requestAnimationFrame(() => this._animate());
 
+        // 场景旋转
+        this.scene.rotation.x = this.rotationX;
+        this.scene.rotation.y = this.rotationZ;
+
+        // 客星脉动动画
         const t = performance.now() * 0.001;
-
-        // 客星脉动
-        this.guestsGroup.children.forEach(g => {
-            if (g.userData && g.userData.guest) {
-                const pulse = 1 + Math.sin(t * 2 + (g.userData.pulseTime || 0)) * 0.15;
-                g.scale.set(pulse, pulse, pulse);
+        this.scene.traverse(o => {
+            if (o.userData?.type === 'guest' && o.material) {
+                o.material.opacity = 0.75 + Math.sin(t * 1.5) * 0.25;
+                const s = o.scale.x;
+                const bs = 2.0;
+                o.scale.setScalar(s + Math.sin(t * 2) * 0.02 * bs);
             }
         });
 
-        // 选中波纹
-        this.selectRingGroup.children.forEach(w => {
-            if (w.userData && w.userData.isWave) {
-                w.userData.t += 0.01;
-                const s = 1 + (w.userData.t % 1);
-                w.scale.set(s, s, s);
-                w.material.opacity = (1 - (w.userData.t % 1)) * 0.5;
-            }
-        });
-
-        this.controls.update();
         this.renderer.render(this.scene, this.camera);
-    }
-
-    // 相机定位到某星
-    flyTo(ra, dec, distance = 2.5) {
-        const pos = Astro.sphereToCartesian(ra, dec, distance);
-        // 平滑过渡
-        const startPos = this.camera.position.clone();
-        const endPos = new THREE.Vector3(pos.x, pos.y, pos.z);
-        let progress = 0;
-        const duration = 800;
-        const startTime = performance.now();
-
-        const animate = () => {
-            const now = performance.now();
-            progress = Math.min(1, (now - startTime) / duration);
-            const eased = 1 - Math.pow(1 - progress, 3);
-            this.camera.position.lerpVectors(startPos, endPos, eased);
-            this.controls.update();
-            if (progress < 1) {
-                requestAnimationFrame(animate);
-            }
-        };
-        animate();
     }
 }
 
