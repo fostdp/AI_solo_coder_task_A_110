@@ -1,0 +1,928 @@
+/* ============================================================
+ * 古代星表数据数字化与现代天体物理验证系统 - 前端样式
+ * ============================================================ */
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+html, body {
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+    background: #000;
+    color: #e0e0e0;
+    font-size: 14px;
+}
+
+#app {
+    width: 100vw;
+    height: 100vh;
+    position: relative;
+    background: radial-gradient(ellipse at center, #0a0a1a 0%, #000 100%);
+}
+
+#star-canvas {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    z-index: 1;
+}
+
+/* ============================================================
+ * 顶部控制栏
+ * ============================================================ */
+.top-bar {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 60px;
+    background: linear-gradient(180deg, rgba(10, 15, 35, 0.95) 0%, rgba(10, 15, 35, 0.7) 100%);
+    border-bottom: 1px solid rgba(100, 150, 255, 0.3);
+    display: flex;
+    align-items: center;
+    padding: 0 20px;
+    z-index: 100;
+    backdrop-filter: blur(8px);
+}
+
+.app-title {
+    font-size: 20px;
+    font-weight: bold;
+    color: #a0c8ff;
+    margin-right: 40px;
+    letter-spacing: 2px;
+    text-shadow: 0 0 10px rgba(100, 150, 255, 0.5);
+}
+
+.app-subtitle {
+    font-size: 12px;
+    color: #8090b0;
+    margin-left: 8px;
+    letter-spacing: 1px;
+}
+
+.controls-group {
+    display: flex;
+    align-items: center;
+    gap: 15px;
+    flex: 1;
+}
+
+.control-item {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.control-item label {
+    font-size: 11px;
+    color: #8090b0;
+}
+
+.control-item select,
+.control-item input[type="range"] {
+    background: rgba(30, 40, 70, 0.8);
+    border: 1px solid rgba(100, 150, 255, 0.4);
+    color: #e0e0e0;
+    padding: 5px 10px;
+    border-radius: 4px;
+    font-size: 13px;
+    min-width: 120px;
+}
+
+.control-item select:focus {
+    outline: none;
+    border-color: #6090ff;
+    box-shadow: 0 0 8px rgba(100, 150, 255, 0.5);
+}
+
+.view-toggle {
+    display: flex;
+    gap: 4px;
+}
+
+.view-toggle button {
+    padding: 5px 12px;
+    background: rgba(30, 40, 70, 0.8);
+    border: 1px solid rgba(100, 150, 255, 0.4);
+    color: #a0c8ff;
+    cursor: pointer;
+    font-size: 12px;
+    border-radius: 4px;
+    transition: all 0.2s;
+}
+
+.view-toggle button.active {
+    background: rgba(80, 120, 220, 0.8);
+    border-color: #80b0ff;
+    color: #fff;
+}
+
+.view-toggle button:hover {
+    background: rgba(80, 120, 220, 0.6);
+}
+
+/* ============================================================
+ * 朝代时间轴
+ * ============================================================ */
+.timeline-container {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    height: 120px;
+    background: linear-gradient(0deg, rgba(10, 15, 35, 0.95) 0%, rgba(10, 15, 35, 0.7) 100%);
+    border-top: 1px solid rgba(100, 150, 255, 0.3);
+    z-index: 100;
+    padding: 10px 30px 15px;
+    backdrop-filter: blur(8px);
+}
+
+.timeline-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 5px;
+}
+
+.timeline-title {
+    font-size: 13px;
+    color: #a0c8ff;
+    letter-spacing: 1px;
+}
+
+.timeline-info {
+    font-size: 12px;
+    color: #8090b0;
+}
+
+.dynasty-timeline {
+    position: relative;
+    width: 100%;
+    height: 60px;
+    margin-top: 8px;
+}
+
+.dynasty-bar-container {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 35px;
+    display: flex;
+    align-items: center;
+    gap: 1px;
+}
+
+.dynasty-bar {
+    flex: 1;
+    height: 100%;
+    position: relative;
+    cursor: pointer;
+    transition: all 0.3s;
+    border-radius: 3px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #fff;
+    font-size: 13px;
+    font-weight: 500;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    overflow: hidden;
+}
+
+.dynasty-bar.han { background: linear-gradient(180deg, #8b1a1a 0%, #5c0d0d 100%); }
+.dynasty-bar.jin { background: linear-gradient(180deg, #1a5c8b 0%, #0d3c5c 100%); }
+.dynasty-bar.sui { background: linear-gradient(180deg, #1a8b5c 0%, #0d5c3c 100%); }
+.dynasty-bar.tang { background: linear-gradient(180deg, #d4a017 0%, #a07810 100%); }
+.dynasty-bar.song { background: linear-gradient(180deg, #5c1a8b 0%, #3c0d5c 100%); }
+.dynasty-bar.yuan { background: linear-gradient(180deg, #8b6b1a 0%, #5c4a0d 100%); }
+.dynasty-bar.ming { background: linear-gradient(180deg, #1a8b8b 0%, #0d5c5c 100%); }
+.dynasty-bar.qing { background: linear-gradient(180deg, #3a3a8b 0%, #1a1a5c 100%); }
+.dynasty-bar.other { background: linear-gradient(180deg, #4a4a4a 0%, #2a2a2a 100%); }
+
+.dynasty-bar:hover {
+    transform: translateY(-3px);
+    box-shadow: 0 4px 15px rgba(100, 150, 255, 0.4);
+    z-index: 10;
+}
+
+.dynasty-bar.active {
+    transform: translateY(-6px);
+    box-shadow: 0 8px 25px rgba(100, 150, 255, 0.7);
+    border: 2px solid #a0c8ff;
+    z-index: 10;
+}
+
+.dynasty-bar.comparing {
+    box-shadow: inset 0 0 0 2px #ffb74d;
+}
+
+.dynasty-bar .year-range {
+    position: absolute;
+    bottom: -18px;
+    left: 50%;
+    transform: translateX(-50%);
+    font-size: 10px;
+    color: #8090b0;
+    white-space: nowrap;
+}
+
+.dynasty-stars-count {
+    position: absolute;
+    top: -18px;
+    left: 50%;
+    transform: translateX(-50%);
+    font-size: 10px;
+    color: #a0c8ff;
+    background: rgba(0, 0, 0, 0.6);
+    padding: 1px 5px;
+    border-radius: 8px;
+}
+
+.timeline-slider {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    height: 10px;
+}
+
+.compare-btn {
+    position: absolute;
+    right: 30px;
+    top: 10px;
+    padding: 6px 15px;
+    background: linear-gradient(180deg, #ff9800 0%, #e65100 100%);
+    color: #fff;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: bold;
+    letter-spacing: 1px;
+    transition: all 0.2s;
+}
+
+.compare-btn:hover {
+    transform: scale(1.05);
+    box-shadow: 0 4px 15px rgba(255, 150, 0, 0.5);
+}
+
+.compare-btn.active {
+    background: linear-gradient(180deg, #ff5722 0%, #b71c1c 100%);
+}
+
+/* ============================================================
+ * 左侧面板 (星表查询)
+ * ============================================================ */
+.side-panel {
+    position: absolute;
+    top: 70px;
+    left: 15px;
+    width: 320px;
+    max-height: calc(100% - 220px);
+    background: rgba(10, 15, 35, 0.92);
+    border: 1px solid rgba(100, 150, 255, 0.4);
+    border-radius: 8px;
+    z-index: 90;
+    backdrop-filter: blur(10px);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.panel-header {
+    padding: 12px 16px;
+    background: linear-gradient(90deg, rgba(60, 90, 160, 0.6) 0%, transparent 100%);
+    border-bottom: 1px solid rgba(100, 150, 255, 0.3);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.panel-title {
+    font-size: 15px;
+    font-weight: bold;
+    color: #a0c8ff;
+    letter-spacing: 1px;
+}
+
+.panel-close {
+    width: 24px;
+    height: 24px;
+    background: none;
+    border: none;
+    color: #8090b0;
+    cursor: pointer;
+    font-size: 18px;
+    line-height: 24px;
+    text-align: center;
+    border-radius: 4px;
+}
+
+.panel-close:hover {
+    background: rgba(255, 80, 80, 0.3);
+    color: #ff8080;
+}
+
+.panel-body {
+    padding: 12px 16px;
+    overflow-y: auto;
+    flex: 1;
+}
+
+.filter-group {
+    margin-bottom: 15px;
+}
+
+.filter-group label {
+    display: block;
+    font-size: 12px;
+    color: #8090b0;
+    margin-bottom: 4px;
+}
+
+.filter-group select,
+.filter-group input {
+    width: 100%;
+    background: rgba(30, 40, 70, 0.8);
+    border: 1px solid rgba(100, 150, 255, 0.4);
+    color: #e0e0e0;
+    padding: 6px 10px;
+    border-radius: 4px;
+    font-size: 13px;
+}
+
+.stars-list {
+    max-height: 250px;
+    overflow-y: auto;
+    margin-top: 10px;
+    border-top: 1px solid rgba(100, 150, 255, 0.2);
+    padding-top: 10px;
+}
+
+.stars-list::-webkit-scrollbar,
+.panel-body::-webkit-scrollbar {
+    width: 6px;
+}
+
+.stars-list::-webkit-scrollbar-track,
+.panel-body::-webkit-scrollbar-track {
+    background: rgba(0, 0, 0, 0.3);
+}
+
+.stars-list::-webkit-scrollbar-thumb,
+.panel-body::-webkit-scrollbar-thumb {
+    background: rgba(100, 150, 255, 0.4);
+    border-radius: 3px;
+}
+
+.star-item {
+    padding: 8px 10px;
+    margin-bottom: 4px;
+    border-radius: 4px;
+    cursor: pointer;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    transition: all 0.2s;
+    border-left: 3px solid transparent;
+}
+
+.star-item:hover {
+    background: rgba(100, 150, 255, 0.15);
+    border-left-color: #6090ff;
+}
+
+.star-item.active {
+    background: rgba(100, 150, 255, 0.25);
+    border-left-color: #a0c8ff;
+}
+
+.star-item .star-name {
+    font-size: 13px;
+    color: #e0e0e0;
+}
+
+.star-item .star-mag {
+    font-size: 11px;
+    color: #8090b0;
+}
+
+/* ============================================================
+ * 右侧面板 (恒星详情 + 古今坐标对比)
+ * ============================================================ */
+.detail-panel {
+    position: absolute;
+    top: 70px;
+    right: 15px;
+    width: 380px;
+    max-height: calc(100% - 220px);
+    background: rgba(10, 15, 35, 0.92);
+    border: 1px solid rgba(100, 150, 255, 0.4);
+    border-radius: 8px;
+    z-index: 90;
+    backdrop-filter: blur(10px);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.detail-section {
+    margin-bottom: 16px;
+}
+
+.detail-section h3 {
+    font-size: 13px;
+    color: #a0c8ff;
+    margin-bottom: 8px;
+    padding-bottom: 4px;
+    border-bottom: 1px solid rgba(100, 150, 255, 0.2);
+    letter-spacing: 1px;
+}
+
+.coord-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+}
+
+.coord-card {
+    background: rgba(30, 40, 70, 0.5);
+    border: 1px solid rgba(100, 150, 255, 0.3);
+    border-radius: 6px;
+    padding: 10px;
+}
+
+.coord-card.ancient {
+    border-color: rgba(255, 180, 100, 0.5);
+    background: rgba(80, 50, 20, 0.3);
+}
+
+.coord-card.modern {
+    border-color: rgba(100, 200, 255, 0.5);
+    background: rgba(20, 50, 80, 0.3);
+}
+
+.coord-card h4 {
+    font-size: 11px;
+    color: #8090b0;
+    margin-bottom: 6px;
+    letter-spacing: 1px;
+}
+
+.coord-card .value {
+    font-size: 15px;
+    font-family: 'Consolas', 'Courier New', monospace;
+    color: #fff;
+    margin-bottom: 2px;
+}
+
+.coord-card .label {
+    font-size: 10px;
+    color: #8090b0;
+}
+
+.coord-compare {
+    display: flex;
+    justify-content: space-between;
+    margin-top: 6px;
+    font-size: 11px;
+    color: #8090b0;
+}
+
+.coord-compare .delta {
+    font-family: 'Consolas', monospace;
+}
+
+.coord-compare .delta.pos { color: #80c080; }
+.coord-compare .delta.neg { color: #c08080; }
+
+.proper-motion-section {
+    background: rgba(20, 40, 70, 0.4);
+    border-radius: 6px;
+    padding: 12px;
+}
+
+.pm-arrow-visual {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 60px;
+    margin: 10px 0;
+    position: relative;
+}
+
+.pm-circle {
+    width: 50px;
+    height: 50px;
+    border: 1px dashed rgba(100, 150, 255, 0.5);
+    border-radius: 50%;
+    position: relative;
+}
+
+.pm-dot {
+    position: absolute;
+    width: 6px;
+    height: 6px;
+    background: #fff;
+    border-radius: 50%;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    box-shadow: 0 0 6px rgba(255, 255, 255, 0.8);
+}
+
+.pm-arrow {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 30px;
+    height: 2px;
+    background: linear-gradient(90deg, #ff9800 0%, #ffeb3b 100%);
+    transform-origin: left center;
+    box-shadow: 0 0 8px rgba(255, 150, 0, 0.6);
+}
+
+.pm-arrow::after {
+    content: '';
+    position: absolute;
+    right: -4px;
+    top: 50%;
+    transform: translateY(-50%) rotate(45deg);
+    width: 6px;
+    height: 6px;
+    border-right: 2px solid #ffeb3b;
+    border-top: 2px solid #ffeb3b;
+}
+
+.pm-info {
+    font-size: 12px;
+    color: #a0c8ff;
+    text-align: center;
+    font-family: 'Consolas', monospace;
+}
+
+.info-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+}
+
+.info-item {
+    font-size: 12px;
+}
+
+.info-item .key {
+    color: #8090b0;
+    margin-right: 4px;
+}
+
+.info-item .value {
+    color: #e0e0e0;
+    font-family: 'Consolas', monospace;
+}
+
+/* ============================================================
+ * 客星匹配面板
+ * ============================================================ */
+.match-panel {
+    position: absolute;
+    top: 70px;
+    right: 15px;
+    width: 420px;
+    max-height: calc(100% - 220px);
+    background: rgba(10, 15, 35, 0.92);
+    border: 1px solid rgba(255, 150, 100, 0.5);
+    border-radius: 8px;
+    z-index: 95;
+    backdrop-filter: blur(10px);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.match-panel .panel-header {
+    background: linear-gradient(90deg, rgba(160, 80, 40, 0.6) 0%, transparent 100%);
+    border-bottom: 1px solid rgba(255, 150, 100, 0.3);
+}
+
+.match-panel .panel-title {
+    color: #ffb74d;
+}
+
+.matches-list {
+    overflow-y: auto;
+    flex: 1;
+}
+
+.match-card {
+    padding: 12px 15px;
+    border-bottom: 1px solid rgba(255, 150, 100, 0.15);
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.match-card:hover {
+    background: rgba(255, 150, 100, 0.08);
+}
+
+.match-card.selected {
+    background: rgba(255, 150, 100, 0.15);
+    border-left: 3px solid #ff9800;
+    padding-left: 12px;
+}
+
+.match-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 8px;
+}
+
+.match-rank {
+    display: inline-block;
+    width: 24px;
+    height: 24px;
+    line-height: 24px;
+    text-align: center;
+    background: linear-gradient(180deg, #ff9800 0%, #e65100 100%);
+    color: #fff;
+    border-radius: 50%;
+    font-size: 12px;
+    font-weight: bold;
+    margin-right: 8px;
+}
+
+.match-name {
+    font-size: 14px;
+    font-weight: bold;
+    color: #ffb74d;
+    flex: 1;
+}
+
+.match-prob {
+    font-size: 18px;
+    font-weight: bold;
+    color: #4caf50;
+    font-family: 'Consolas', monospace;
+}
+
+.match-prob.low { color: #f44336; }
+.match-prob.mid { color: #ff9800; }
+
+.match-type {
+    display: inline-block;
+    padding: 2px 8px;
+    background: rgba(100, 150, 255, 0.3);
+    color: #a0c8ff;
+    border-radius: 10px;
+    font-size: 10px;
+    margin-left: 6px;
+}
+
+.match-scores {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 4px;
+    margin-top: 6px;
+}
+
+.score-bar {
+    display: flex;
+    align-items: center;
+    font-size: 11px;
+    color: #8090b0;
+}
+
+.score-bar .label {
+    width: 50px;
+}
+
+.score-bar .bar {
+    flex: 1;
+    height: 6px;
+    background: rgba(0, 0, 0, 0.4);
+    border-radius: 3px;
+    overflow: hidden;
+    margin: 0 6px;
+}
+
+.score-bar .bar-fill {
+    height: 100%;
+    background: linear-gradient(90deg, #4caf50 0%, #8bc34a 100%);
+    transition: width 0.5s;
+}
+
+.score-bar .bar-fill.warn {
+    background: linear-gradient(90deg, #ff9800 0%, #ffc107 100%);
+}
+
+.score-bar .bar-fill.danger {
+    background: linear-gradient(90deg, #f44336 0%, #ff5722 100%);
+}
+
+.score-bar .value {
+    width: 50px;
+    text-align: right;
+    color: #a0c8ff;
+    font-family: 'Consolas', monospace;
+}
+
+.bayes-badge {
+    display: inline-block;
+    margin-top: 8px;
+    padding: 3px 8px;
+    background: rgba(76, 175, 80, 0.3);
+    color: #81c784;
+    border-radius: 4px;
+    font-size: 11px;
+    font-family: 'Consolas', monospace;
+}
+
+/* ============================================================
+ * 图例
+ * ============================================================ */
+.legend {
+    position: absolute;
+    bottom: 140px;
+    left: 15px;
+    background: rgba(10, 15, 35, 0.9);
+    border: 1px solid rgba(100, 150, 255, 0.4);
+    border-radius: 6px;
+    padding: 12px;
+    z-index: 80;
+    font-size: 12px;
+}
+
+.legend-item {
+    display: flex;
+    align-items: center;
+    margin-bottom: 6px;
+}
+
+.legend-symbol {
+    width: 16px;
+    height: 16px;
+    margin-right: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.legend-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #fff;
+}
+
+.legend-dot.bright { background: #fff; box-shadow: 0 0 6px #fff; }
+.legend-dot.medium { background: #a0c8ff; width: 6px; height: 6px; }
+.legend-dot.faint  { background: #607080; width: 4px; height: 4px; }
+
+.legend-dot.comet {
+    background: #00e5ff;
+    border-radius: 0;
+    transform: rotate(45deg);
+    box-shadow: 0 0 8px #00e5ff;
+}
+
+.legend-dot.guest {
+    background: #ff5722;
+    border-radius: 50%;
+    box-shadow: 0 0 10px #ff5722;
+}
+
+.legend-dot.mansion {
+    width: 12px;
+    height: 12px;
+    border: 1px dashed #a0c8ff;
+    border-radius: 50%;
+    background: transparent;
+}
+
+.legend-label {
+    color: #a0c8ff;
+}
+
+/* ============================================================
+ * 提示信息
+ * ============================================================ */
+.loading-indicator {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    z-index: 200;
+    text-align: center;
+    color: #a0c8ff;
+    font-size: 14px;
+}
+
+.spinner {
+    width: 40px;
+    height: 40px;
+    border: 3px solid rgba(100, 150, 255, 0.3);
+    border-top-color: #6090ff;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    margin: 0 auto 12px;
+}
+
+@keyframes spin {
+    to { transform: rotate(360deg); }
+}
+
+.tooltip {
+    position: absolute;
+    background: rgba(10, 15, 35, 0.98);
+    border: 1px solid rgba(100, 150, 255, 0.5);
+    border-radius: 6px;
+    padding: 8px 12px;
+    font-size: 12px;
+    color: #e0e0e0;
+    pointer-events: none;
+    z-index: 150;
+    white-space: nowrap;
+    box-shadow: 0 4px 15px rgba(0, 0, 0, 0.5);
+}
+
+.tooltip .name {
+    font-weight: bold;
+    color: #a0c8ff;
+    margin-bottom: 4px;
+}
+
+/* ============================================================
+ * 浮动按钮
+ * ============================================================ */
+.fab-panel-toggle {
+    position: absolute;
+    top: 75px;
+    left: 15px;
+    width: 40px;
+    height: 40px;
+    background: linear-gradient(180deg, rgba(60, 90, 160, 0.9) 0%, rgba(30, 50, 100, 0.9) 100%);
+    border: 1px solid rgba(100, 150, 255, 0.6);
+    border-radius: 50%;
+    color: #a0c8ff;
+    font-size: 20px;
+    cursor: pointer;
+    z-index: 85;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.2s;
+}
+
+.fab-panel-toggle:hover {
+    transform: scale(1.1);
+    box-shadow: 0 4px 15px rgba(100, 150, 255, 0.5);
+}
+
+.fab-panel-toggle.show {
+    display: flex;
+}
+
+/* ============================================================
+ * 对比模式高亮
+ * ============================================================ */
+.compare-overlay {
+    position: absolute;
+    top: 60px;
+    left: 0;
+    right: 0;
+    height: 30px;
+    background: linear-gradient(90deg, rgba(255, 150, 0, 0.2) 0%, rgba(255, 80, 0, 0.2) 100%);
+    border-bottom: 1px solid rgba(255, 150, 0, 0.4);
+    z-index: 90;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    color: #ffb74d;
+    font-size: 13px;
+    letter-spacing: 2px;
+}
+
+.compare-overlay.active {
+    display: flex;
+}
+
+.delta-tag {
+    display: inline-block;
+    padding: 2px 8px;
+    background: rgba(255, 150, 0, 0.3);
+    color: #ffb74d;
+    border-radius: 4px;
+    font-size: 11px;
+    margin-left: 6px;
+    font-family: 'Consolas', monospace;
+}
